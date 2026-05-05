@@ -21,6 +21,10 @@ ocr = [
 tui = [
     "textual>=0.60",
 ]
+web = [
+    "fastapi>=0.111",
+    "uvicorn>=0.30",
+]
 
 [project.scripts]
 docorg = "docorg.cli:main"

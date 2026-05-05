@@ -180,6 +180,30 @@ def search(query: str, config: str) -> None:
         )
 
 
+@main.command("web")
+@click.option("--config", default="config.yaml", show_default=True,
+              help="Path to config file.")
+@click.option("--host", default="127.0.0.1", show_default=True,
+              help="Host address to bind.")
+@click.option("--port", default=8000, type=int, show_default=True,
+              help="Port for the web server.")
+def web(config: str, host: str, port: int) -> None:
+    """Start a local browser UI for searching and viewing documents."""
+    cfg = _resolve_config(config)
+
+    try:
+        import uvicorn
+    except ImportError as exc:
+        raise click.ClickException(
+            "Web UI dependencies are missing. Install with: pip install -e \".[web]\""
+        ) from exc
+
+    from .web import create_app
+
+    click.echo(f"Starting web UI at http://{host}:{port}")
+    uvicorn.run(create_app(cfg), host=host, port=port)
+
+
 @main.group()
 def category() -> None:
     """Manage document categories."""

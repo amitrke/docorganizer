@@ -74,6 +74,18 @@ docorg search "income tax 2024"
 
 Output columns: `filename`, `detected date`, `category`, `filepath`.
 
+### Browse documents in a web UI
+
+Launch a local browser UI to search, filter, and open indexed documents.
+
+```sh
+pip install -e ".[web]"
+docorg web
+docorg web --host 0.0.0.0 --port 8080
+```
+
+Open `http://127.0.0.1:8000` in your browser.
+
 ### Manage categories
 
 Categories are stored in `config.yaml`. These commands edit the file directly — no code changes needed.
@@ -185,4 +197,4 @@ Date detection priority is: filename date -> keyword-prefixed text date -> gener
 | 6 | ✅ Done (CLI) | Review workflow (`docorg review ...`) for edit, skip, and re-file |
 | 7 | ✅ Done (on-demand) | AI-assisted suggestions via Ollama (`docorg review ask-ai`, interactive ask-ai) |
 | 8 | ✅ Done | CLI search via SQLite FTS5 (`docorg search`) |
-| 9 | Future  | FastAPI backend + React UI |
+| 9 | ✅ Done (FastAPI MVP) | Browser UI for search, filters, detail, and document view |
