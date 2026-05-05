@@ -40,6 +40,7 @@ A Python-based desktop/CLI tool that ingests scanned PDF documents, extracts the
 |----|-------------|
 | F7 | The system shall attempt to detect a document date using regex patterns (e.g., `YYYY-MM-DD`, `DD/MM/YYYY`). |
 | F8 | The system shall recognize keyword-prefixed dates such as "Invoice Date" and "Statement Date". |
+| F8a | Date-detection keywords shall be configurable via local config (no code changes required). |
 | F9 | The detected date shall determine the target `YYYY/MM` folder. |
 | F10 | If no date is detected, the system shall fall back to the file's last **modification** date. |
 

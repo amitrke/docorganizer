@@ -33,6 +33,17 @@ _MONTH_MAP = {
     "september": 9, "october": 10, "november": 11, "december": 12,
 }
 
+_DATE_KEYWORDS = (
+    "invoice date",
+    "statement date",
+    "date of service",
+    "service date",
+    "visit date",
+    "appointment date",
+    "issued on",
+    "date:",
+)
+
 
 def _filename_date(file_path: str | Path | None) -> date | None:
     """Extract an unambiguous date from the filename, if present."""
@@ -79,7 +90,35 @@ def _parse_match(m: re.Match, fmt: str) -> date | None:
     return None
 
 
-def detect_date(text: str, file_path: str | Path | None = None) -> tuple[date | None, int]:
+def _extract_text_dates(text: str) -> list[date]:
+    """Return valid date candidates found in text using generic patterns."""
+    matches: list[tuple[int, date]] = []
+    for pattern, fmt in _PATTERNS:
+        for m in re.finditer(pattern, text, re.IGNORECASE):
+            d = _parse_match(m, fmt)
+            if d and date(1990, 1, 1) <= d <= date(2100, 12, 31):
+                matches.append((m.start(), d))
+    matches.sort(key=lambda item: item[0])
+    return [d for _, d in matches]
+
+
+def _keyword_prefixed_date(text: str, keywords: list[str]) -> date | None:
+    """Try to detect a date that appears immediately after a known date label."""
+    for keyword in keywords:
+        for m in re.finditer(re.escape(keyword), text, re.IGNORECASE):
+            # Scan a short window after the label where document dates usually appear.
+            window = text[m.start(): m.start() + 120]
+            candidates = _extract_text_dates(window)
+            if candidates:
+                return candidates[0]
+    return None
+
+
+def detect_date(
+    text: str,
+    file_path: str | Path | None = None,
+    date_keywords: list[str] | None = None,
+) -> tuple[date | None, int]:
     """
     Attempt to detect a document date from extracted text.
 
@@ -90,20 +129,26 @@ def detect_date(text: str, file_path: str | Path | None = None) -> tuple[date | 
 
     Detection order:
       1) Filename date patterns (high confidence)
-      2) Text date patterns
-      3) File modification date fallback when file_path is given
+      2) Keyword-prefixed text dates (e.g., "Statement Date")
+      3) Generic text date patterns
+      4) File modification date fallback when file_path is given
     """
     filename_date = _filename_date(file_path)
     if filename_date is not None:
         return filename_date, 1
 
-    candidates: list[date] = []
+    if date_keywords is None:
+        keywords = list(_DATE_KEYWORDS)
+    else:
+        keywords = [k for k in date_keywords if isinstance(k, str) and k.strip()]
+        if not keywords:
+            keywords = list(_DATE_KEYWORDS)
 
-    for pattern, fmt in _PATTERNS:
-        for m in re.finditer(pattern, text, re.IGNORECASE):
-            d = _parse_match(m, fmt)
-            if d and date(1990, 1, 1) <= d <= date(2100, 12, 31):
-                candidates.append(d)
+    keyword_date = _keyword_prefixed_date(text, keywords)
+    if keyword_date is not None:
+        return keyword_date, 1
+
+    candidates = _extract_text_dates(text)
 
     if candidates:
         # Use the earliest plausible date — most likely to be the document date

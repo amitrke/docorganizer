@@ -15,6 +15,18 @@ paths:
   inbox: scans
 processing:
   mode: auto
+
+date_detection:
+  keywords:
+  - invoice date
+  - statement date
+  - date of service
+  - service date
+  - visit date
+  - appointment date
+  - issued on
+  - date:
+
 rules:
 - category: health
   keywords:

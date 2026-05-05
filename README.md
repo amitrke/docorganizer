@@ -110,6 +110,19 @@ paths:
 processing:
   mode: auto            # auto | interactive (interactive = Phase 5)
 
+date_detection:
+  # Keywords used to find label-prefixed dates before generic date parsing.
+  # Example matches: "Statement Date: 29/04/2026", "Date of Service 2026-04-29".
+  keywords:
+    - invoice date
+    - statement date
+    - date of service
+    - service date
+    - visit date
+    - appointment date
+    - issued on
+    - date:
+
 categories:
   - health
   - tax
@@ -136,6 +149,8 @@ ai:
 ```
 
 To use AI-assisted classification, set `ai.enabled: true` and ensure Ollama is running with your chosen model pulled (`ollama pull mistral:7b-instruct`).
+
+Date detection priority is: filename date -> keyword-prefixed text date -> generic text date -> file modified date fallback.
 
 ---
 

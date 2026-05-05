@@ -61,7 +61,12 @@ def process_pdf(
     text = extract_text(pdf_path)
 
     # Step 2: detect date
-    doc_date, candidate_count = detect_date(text, file_path=pdf_path)
+    configured_keywords = cfg.get("date_detection", {}).get("keywords")
+    doc_date, candidate_count = detect_date(
+        text,
+        file_path=pdf_path,
+        date_keywords=configured_keywords,
+    )
 
     # Step 3: detect category
     rules: list[dict] = cfg.get("rules", [])
