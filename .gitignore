@@ -1,7 +1,39 @@
-# Ignore Gradle project-specific cache directory
-.gradle
+# ── Gradle (legacy) ──────────────────────────────────────────────────────────
+.gradle/
+build/
 
-# Ignore Gradle build output directory
-build
-
+# ── IDE / Editor ─────────────────────────────────────────────────────────────
 .idea/
+.vscode/
+*.suo
+*.user
+
+# ── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+.eggs/
+*.egg
+
+# ── Virtual environments ─────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+.env
+
+# ── Runtime data (created locally, not committed) ────────────────────────────
+scans/
+documents/
+docorganizer.db
+docorganizer.db-shm
+docorganizer.db-wal
+
+# ── Config overrides ─────────────────────────────────────────────────────────
+config.local.yaml
+
+# ── OS ───────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
