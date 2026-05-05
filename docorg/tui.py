@@ -18,6 +18,7 @@ from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Sta
 
 from .database import get_connection, list_documents, parse_extracted_fields, update_document_fields
 from .filer import file_document
+from .pathing import resolve_stored_path, to_stored_path
 
 
 # ---------------------------------------------------------------------------
@@ -559,9 +560,7 @@ class ReviewApp(App):
             )
             return
 
-        src = Path(doc["filepath"])
-        if not src.is_absolute():
-            src = Path.cwd() / src
+        src = resolve_stored_path(doc["filepath"], self._cfg)
         if not src.exists():
             self.notify(f"Source file not found:\n{src}", severity="error")
             return
@@ -586,7 +585,7 @@ class ReviewApp(App):
                     update_document_fields(
                         conn,
                         doc_id,
-                        filepath=str(dest),
+                        filepath=to_stored_path(dest, self._cfg),
                         filing_status="filed",
                         skipped=0,
                     )

@@ -1,0 +1,25 @@
+services:
+  docorg-web:
+    build: .
+    # Or use a pre-built image:
+    # image: your-registry/docorg-web:latest
+    container_name: docorg-web
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      # Config file (required)
+      - /volume1/docorganizer/config.web.yaml:/data/config.web.yaml:ro
+
+      # Database — single file, mounted read-write so SQLite WAL files can be created
+      - /volume1/docorganizer/docorganizer.db:/data/docorganizer.db
+
+      # Inbox — where new scans land (read-only for the web UI)
+      - /volume1/docorganizer/scans:/data/scans:ro
+
+      # Filed documents — the browsable archive (read-only for the web UI)
+      - /volume1/docorganizer/documents:/data/documents:ro
+    environment:
+      - PYTHONUNBUFFERED=1
+    # Optional: run as a non-root user matching your Synology file ownership
+    # user: "1026:100"

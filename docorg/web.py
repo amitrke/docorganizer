@@ -7,6 +7,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, HTMLResponse
 
 from .database import get_connection, get_document_by_id, list_documents, parse_extracted_fields, search_documents
+from .pathing import resolve_stored_path
 
 
 def _fmt(value: object | None, default: str = "(none)") -> str:
@@ -21,6 +22,53 @@ def _resolve_doc_path(filepath: str) -> Path:
     if not doc_path.is_absolute():
         doc_path = Path.cwd() / doc_path
     return doc_path.resolve()
+
+
+def _apply_path_rewrites(filepath: str, rewrites: list[dict]) -> str:
+    """Apply configured path prefix rewrites (e.g. Windows share path → container path).
+
+    Rewrites are applied in order; the first matching rule wins.
+    Comparison is case-insensitive to handle Windows drive-letter casing.
+    """
+    for rule in rewrites:
+        src = rule.get("from", "")
+        dst = rule.get("to", "")
+        if not src:
+            continue
+        norm_filepath = filepath.replace("\\", "/")
+        norm_src = src.replace("\\", "/")
+        if norm_filepath.lower().startswith(norm_src.lower()):
+            remainder = filepath[len(src):].lstrip("/\\")
+            return dst.rstrip("/") + "/" + remainder if remainder else dst.rstrip("/")
+    return filepath
+
+
+def _translate_filepath(filepath: str, base_from: str | None, base_to: str | None, rewrites: list[dict]) -> str:
+    """Translate stored file paths for the web host.
+
+    Priority:
+    1) Single base mapping (`base_from` -> `base_to`) for common split-host setups.
+    2) Legacy/advanced list mapping via `path_rewrite`.
+    """
+    if base_from and base_to:
+        norm_filepath = filepath.replace("\\", "/")
+        norm_from = base_from.replace("\\", "/")
+        if norm_filepath.lower().startswith(norm_from.lower()):
+            remainder = filepath[len(base_from):].lstrip("/\\")
+            return base_to.rstrip("/") + "/" + remainder if remainder else base_to.rstrip("/")
+
+    return _apply_path_rewrites(filepath, rewrites)
+
+
+def _resolve_db_filepath(filepath: str, cfg: dict, base_from: str | None,
+                         base_to: str | None, rewrites: list[dict]) -> Path:
+    """Resolve DB filepath supporting both host-neutral and legacy absolute records."""
+    normalized = filepath.replace("\\", "/")
+    if normalized.startswith("documents/") or normalized.startswith("inbox/"):
+        return resolve_stored_path(filepath, cfg)
+
+    translated = _translate_filepath(filepath, base_from, base_to, rewrites)
+    return _resolve_doc_path(translated)
 
 
 def _render_home(cfg: dict, query: str, status: str, category: str | None, rows: list) -> str:
@@ -389,6 +437,10 @@ def _render_detail(row, file_exists: bool) -> str:
 def create_app(cfg: dict) -> FastAPI:
     app = FastAPI(title="docorg web")
     db_path = cfg["paths"]["database"]
+    web_cfg = cfg.get("web", {})
+    path_rewrites: list[dict] = web_cfg.get("path_rewrite", [])
+    path_base_from: str | None = web_cfg.get("path_base_from")
+    path_base_to: str | None = web_cfg.get("path_base_to")
 
     @app.get("/", response_class=HTMLResponse)
     def home(
@@ -413,7 +465,10 @@ def create_app(cfg: dict) -> FastAPI:
             row = get_document_by_id(conn, doc_id)
         if not row:
             raise HTTPException(status_code=404, detail="Document not found")
-        file_exists = _resolve_doc_path(row["filepath"]).exists()
+        doc_path = _resolve_db_filepath(
+            row["filepath"], cfg, path_base_from, path_base_to, path_rewrites
+        )
+        file_exists = doc_path.exists()
         return HTMLResponse(_render_detail(row, file_exists))
 
     @app.get("/documents/{doc_id}/content")
@@ -423,7 +478,9 @@ def create_app(cfg: dict) -> FastAPI:
         if not row:
             raise HTTPException(status_code=404, detail="Document not found")
 
-        doc_path = _resolve_doc_path(row["filepath"])
+        doc_path = _resolve_db_filepath(
+            row["filepath"], cfg, path_base_from, path_base_to, path_rewrites
+        )
         if not doc_path.exists() or not doc_path.is_file():
             raise HTTPException(status_code=404, detail="Document file is missing")
 

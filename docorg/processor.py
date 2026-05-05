@@ -9,6 +9,7 @@ from .database import document_exists, insert_document, update_filing
 from .date_detector import detect_date
 from .extractor import extract_text
 from .filer import file_document
+from .pathing import to_stored_path
 
 
 def _build_analysis(pdf_path: Path, *, cfg: dict) -> dict:
@@ -36,7 +37,8 @@ def _build_analysis(pdf_path: Path, *, cfg: dict) -> dict:
 
 def analyze_pdf(pdf_path: str | Path, *, cfg: dict, conn: sqlite3.Connection) -> dict:
     pdf_path = Path(pdf_path)
-    if document_exists(conn, str(pdf_path)):
+    stored_source_path = to_stored_path(pdf_path, cfg)
+    if document_exists(conn, stored_source_path) or document_exists(conn, str(pdf_path)):
         return {"status": "duplicate", "path": str(pdf_path)}
 
     analysis = _build_analysis(pdf_path, cfg=cfg)
@@ -100,9 +102,10 @@ def process_pdf(
     Returns a dict with processing results for display / TUI use.
     """
     pdf_path = Path(pdf_path)
+    stored_source_path = to_stored_path(pdf_path, cfg)
 
     # NF3 — skip already-processed files
-    if document_exists(conn, str(pdf_path)):
+    if document_exists(conn, stored_source_path) or document_exists(conn, str(pdf_path)):
         return {"status": "duplicate", "path": str(pdf_path)}
 
     analysis = _build_analysis(pdf_path, cfg=cfg)
@@ -126,7 +129,7 @@ def process_pdf(
     doc_id = insert_document(
         conn,
         filename=pdf_path.name,
-        filepath=str(pdf_path),
+        filepath=stored_source_path,
         extracted_text=text,
         detected_date=doc_date.isoformat() if doc_date else None,
         category=category,
@@ -159,7 +162,7 @@ def process_pdf(
     )
 
     # Step 6: update DB with final path and filed status
-    update_filing(conn, doc_id, filepath=str(dest), filing_status="filed")
+    update_filing(conn, doc_id, filepath=to_stored_path(dest, cfg), filing_status="filed")
 
     return {
         "status": "filed",

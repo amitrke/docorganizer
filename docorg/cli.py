@@ -14,6 +14,7 @@ from .database import (
     update_document_fields,
 )
 from .filer import file_document
+from .pathing import is_host_neutral_path, resolve_stored_path, to_stored_path
 from .processor import analyze_pdf, process_pdf
 from .watcher import start_watcher
 
@@ -335,6 +336,44 @@ def review_list(config: str, status: str, category: str | None) -> None:
         )
 
 
+@review.command("clear-legacy")
+@click.option("--config", default="config.yaml", show_default=True)
+@click.option("--apply", is_flag=True,
+              help="Delete legacy-path rows from DB. Without this flag, runs as preview.")
+@click.option("--limit", default=20, show_default=True, type=int,
+              help="How many sample rows to print in preview mode.")
+def review_clear_legacy(config: str, apply: bool, limit: int) -> None:
+    """Preview or delete rows with legacy (host-specific) filepath values."""
+    cfg = _resolve_config(config)
+    with get_connection(cfg["paths"]["database"]) as conn:
+        rows = conn.execute(
+            "SELECT id, filename, filepath FROM documents ORDER BY id"
+        ).fetchall()
+        legacy_rows = [row for row in rows if not is_host_neutral_path(row["filepath"])]
+
+        if not legacy_rows:
+            click.echo("No legacy DB path rows found.")
+            return
+
+        click.echo(f"Found {len(legacy_rows)} legacy row(s).")
+
+        if not apply:
+            click.echo("Preview (not deleted):")
+            for row in legacy_rows[: max(1, limit)]:
+                click.echo(f"  #{row['id']:<4} {row['filename']:<35} {row['filepath']}")
+            if len(legacy_rows) > limit:
+                click.echo(f"  ... and {len(legacy_rows) - limit} more")
+            click.echo("Re-run with --apply to delete these legacy rows.")
+            return
+
+        conn.executemany(
+            "DELETE FROM documents WHERE id = ?",
+            [(row["id"],) for row in legacy_rows],
+        )
+        conn.commit()
+        click.echo(f"Deleted {len(legacy_rows)} legacy row(s).")
+
+
 @review.command("set-date")
 @click.option("--config", default="config.yaml", show_default=True)
 @click.argument("doc_id", type=int)
@@ -460,9 +499,7 @@ def review_refile(config: str, doc_id: int) -> None:
             click.echo("Cannot re-file without a detected date. Set date first.")
             return
 
-        src = Path(row["filepath"])
-        if not src.is_absolute():
-            src = Path.cwd() / src
+        src = resolve_stored_path(row["filepath"], cfg)
         if not src.exists():
             click.echo(f"Source file missing: {src}")
             return
@@ -477,7 +514,7 @@ def review_refile(config: str, doc_id: int) -> None:
         update_document_fields(
             conn,
             doc_id,
-            filepath=str(dest),
+            filepath=to_stored_path(dest, cfg),
             filing_status="filed",
             skipped=0,
         )
