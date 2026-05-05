@@ -34,6 +34,34 @@ _MONTH_MAP = {
 }
 
 
+def _filename_date(file_path: str | Path | None) -> date | None:
+    """Extract an unambiguous date from the filename, if present."""
+    if file_path is None:
+        return None
+
+    name = Path(file_path).stem
+
+    # YYYYMMDD / YYYY-MM-DD / YYYY_MM_DD
+    for m in re.finditer(r"(?<!\d)(\d{4})[\-_]?(\d{2})[\-_]?(\d{2})(?!\d)", name):
+        try:
+            d = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            continue
+        if date(1990, 1, 1) <= d <= date(2100, 12, 31):
+            return d
+
+    # MMDDYYYY / MM-DD-YYYY / MM_DD_YYYY
+    for m in re.finditer(r"(?<!\d)(\d{2})[\-_]?(\d{2})[\-_]?((?:19|20)\d{2})(?!\d)", name):
+        try:
+            d = date(int(m.group(3)), int(m.group(1)), int(m.group(2)))
+        except ValueError:
+            continue
+        if date(1990, 1, 1) <= d <= date(2100, 12, 31):
+            return d
+
+    return None
+
+
 def _parse_match(m: re.Match, fmt: str) -> date | None:
     try:
         if fmt == "ymd":
@@ -60,9 +88,15 @@ def detect_date(text: str, file_path: str | Path | None = None) -> tuple[date | 
         detected_date is None if no valid date was found in text.
         candidate_count is useful for confidence display in the TUI.
 
-    Falls back to the file's modification date only when file_path is given
-    and no date is found in the text.
+    Detection order:
+      1) Filename date patterns (high confidence)
+      2) Text date patterns
+      3) File modification date fallback when file_path is given
     """
+    filename_date = _filename_date(file_path)
+    if filename_date is not None:
+        return filename_date, 1
+
     candidates: list[date] = []
 
     for pattern, fmt in _PATTERNS:
