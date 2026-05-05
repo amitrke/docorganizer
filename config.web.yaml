@@ -1,0 +1,28 @@
+# config.web.yaml — NAS / Docker web-only configuration
+#
+# Place this file at: /volume1/docorganizer/config.web.yaml  (on the Synology)
+# The Docker container will read it from /data/config.web.yaml
+#
+# Your Windows desktop uses the regular config.yaml pointed at the same
+# share via its mounted drive letter (e.g. Z:\docorganizer\).
+
+paths:
+  # Each path matches the container-side mount point defined in docker-compose.yml.
+  inbox:     /data/scans
+  documents: /data/documents
+  database:  /data/docorganizer.db
+
+processing:
+  mode: auto   # not used by the web server, but required by config loader
+
+categories:
+  - health
+  - tax
+  - education
+  - insurance
+  - utilities
+  - finance
+
+ai:
+  enabled: false   # AI classification runs on the desktop, not here
+

@@ -1,0 +1,81 @@
+ai:
+  enabled: true
+  model: mistral:7b-instruct
+  ollama_url: http://localhost:11434
+categories:
+- health
+- tax
+- education
+- insurance
+- utilities
+- finance
+paths:
+  database: docorganizer.db
+  documents: documents
+  inbox: scans
+processing:
+  mode: auto
+
+date_detection:
+  keywords:
+  - invoice date
+  - statement date
+  - date of service
+  - service date
+  - visit date
+  - appointment date
+  - issued on
+  - date:
+
+rules:
+- category: health
+  keywords:
+  - doctor
+  - clinic
+  - hospital
+  - prescription
+  - pharmacy
+  - medical
+  - pathology
+  priority: 10
+- category: tax
+  keywords:
+  - income tax
+  - itr
+  - tax return
+  - form 16
+  - tds
+  - gst
+  priority: 10
+- category: education
+  keywords:
+  - school
+  - college
+  - university
+  - tuition
+  - fee receipt
+  - marksheet
+  - admit card
+  priority: 10
+- category: insurance
+  keywords:
+  - insurance
+  - policy
+  - premium
+  - claim
+  priority: 10
+- category: utilities
+  keywords:
+  - electricity
+  - water bill
+  - gas bill
+  - broadband
+  - internet bill
+  priority: 10
+- category: finance
+  keywords:
+  - bank statement
+  - account statement
+  - credit card
+  - loan
+  priority: 10

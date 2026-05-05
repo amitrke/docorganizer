@@ -1,0 +1,18 @@
+# runtime
+pymupdf>=1.24
+watchdog>=4.0
+click>=8.1
+pyyaml>=6.0
+
+# Phase 2 — OCR fallback (install separately with: pip install docorganizer[ocr])
+# pytesseract>=0.3
+# Pillow>=10.0
+
+# Phase 6 — TUI (install separately with: pip install docorganizer[tui])
+# textual>=0.60
+
+# Phase 7 — AI (no extra package; uses Ollama REST API directly)
+
+# Phase 9 — Web UI (install separately with: pip install docorganizer[web])
+# fastapi>=0.111
+# uvicorn>=0.30
