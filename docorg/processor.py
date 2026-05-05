@@ -11,6 +11,47 @@ from .extractor import extract_text
 from .filer import file_document
 
 
+def _build_analysis(pdf_path: Path, *, cfg: dict) -> dict:
+    text = extract_text(pdf_path)
+
+    configured_keywords = cfg.get("date_detection", {}).get("keywords")
+    doc_date, candidate_count = detect_date(
+        text,
+        file_path=pdf_path,
+        date_keywords=configured_keywords,
+    )
+
+    rules: list[dict] = cfg.get("rules", [])
+    category = _match_category(text, pdf_path.name, rules)
+    classification_source = "rules" if (doc_date or category) else "fallback"
+
+    return {
+        "text": text,
+        "doc_date": doc_date,
+        "candidate_count": candidate_count,
+        "category": category,
+        "classification_source": classification_source,
+    }
+
+
+def analyze_pdf(pdf_path: str | Path, *, cfg: dict, conn: sqlite3.Connection) -> dict:
+    pdf_path = Path(pdf_path)
+    if document_exists(conn, str(pdf_path)):
+        return {"status": "duplicate", "path": str(pdf_path)}
+
+    analysis = _build_analysis(pdf_path, cfg=cfg)
+    return {
+        "status": "analyzed",
+        "filename": pdf_path.name,
+        "path": str(pdf_path),
+        "text": analysis["text"],
+        "detected_date": analysis["doc_date"].isoformat() if analysis["doc_date"] else None,
+        "candidate_count": analysis["candidate_count"],
+        "category": analysis["category"],
+        "classification_source": analysis["classification_source"],
+    }
+
+
 def _match_category(text: str, filename: str, rules: list[dict]) -> str | None:
     """
     Evaluate extracted text and filename against mapping rules.
@@ -38,6 +79,10 @@ def process_pdf(
     *,
     cfg: dict,
     conn: sqlite3.Connection,
+    override_date=None,
+    override_category: str | None = None,
+    override_source: str | None = None,
+    skip: bool = False,
 ) -> dict:
     """
     Full Phase-1 pipeline for a single PDF:
@@ -57,21 +102,19 @@ def process_pdf(
     if document_exists(conn, str(pdf_path)):
         return {"status": "duplicate", "path": str(pdf_path)}
 
-    # Step 1: extract text
-    text = extract_text(pdf_path)
+    analysis = _build_analysis(pdf_path, cfg=cfg)
+    text = analysis["text"]
+    doc_date = analysis["doc_date"]
+    candidate_count = analysis["candidate_count"]
+    category = analysis["category"]
+    classification_source = analysis["classification_source"]
 
-    # Step 2: detect date
-    configured_keywords = cfg.get("date_detection", {}).get("keywords")
-    doc_date, candidate_count = detect_date(
-        text,
-        file_path=pdf_path,
-        date_keywords=configured_keywords,
-    )
-
-    # Step 3: detect category
-    rules: list[dict] = cfg.get("rules", [])
-    category = _match_category(text, pdf_path.name, rules)
-    classification_source = "rules" if (doc_date or category) else "fallback"
+    if override_date is not None:
+        doc_date = override_date
+    if override_category is not None:
+        category = override_category
+    if override_source is not None:
+        classification_source = override_source
 
     # Step 4: insert pending record
     doc_id = insert_document(
@@ -83,7 +126,20 @@ def process_pdf(
         category=category,
         classification_source=classification_source,
         filing_status="pending",
+        skipped=1 if skip else 0,
     )
+
+    if skip:
+        return {
+            "status": "skipped",
+            "doc_id": doc_id,
+            "filename": pdf_path.name,
+            "path": str(pdf_path),
+            "detected_date": doc_date.isoformat() if doc_date else None,
+            "candidate_count": candidate_count,
+            "category": category,
+            "classification_source": classification_source,
+        }
 
     # Step 5: move file
     dest = file_document(

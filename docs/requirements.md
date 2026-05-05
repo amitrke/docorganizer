@@ -31,7 +31,7 @@ A Python-based desktop/CLI tool that ingests scanned PDF documents, extracts the
 | ID | Requirement |
 |----|-------------|
 | F4 | The system shall extract text from searchable PDFs using `PyMuPDF` or `pdfminer.six`. |
-| F5 | If extracted text is empty, the system shall fall back to OCR via `Tesseract` (`pytesseract`). |
+| F5 | If extracted text is empty for a page (or entire PDF), the system shall fall back to OCR via `Tesseract` (`pytesseract`). |
 | F6 | Extracted text shall be stored in the database alongside document metadata. |
 
 ### 3.3 Date Detection
@@ -83,13 +83,13 @@ A Python-based desktop/CLI tool that ingests scanned PDF documents, extracts the
 | F27 | If the user chooses **Skip** during interactive ingestion, the file shall remain in the inbox and appear in `docorg review` with a `skipped` flag. |
 | F28 | Interactive mode shall be the recommended default when processing files manually or on-demand. |
 
-### 3.8 TUI Review Menu
+### 3.8 Review Menu (CLI/TUI)
 
 | ID | Requirement |
 |----|-------------|
-| F30 | The system shall provide a TUI (terminal menu) invoked via `docorg review` that lists **all** documents known to the system — both pending inbox files and previously filed documents. |
-| F31 | The menu shall display each entry as a selectable row showing: filename, current date, current category, classification source (`rules` / `ai` / `manual`), and filing status (`pending` / `filed`). |
-| F32 | For each selected file, the menu shall offer the following actions: **File as-is**, **Edit date**, **Edit category**, **Ask AI**, **Re-file**, and **Skip**. |
+| F30 | The system shall provide a terminal review workflow invoked via `docorg review` that lists **all** documents known to the system — both pending inbox files and previously filed documents. |
+| F31 | The review output shall display each entry with: filename, current date, current category, classification source (`rules` / `ai` / `manual`), and filing status (`pending` / `filed`). |
+| F32 | For each selected file, the review workflow shall offer: **File as-is**, **Edit date**, **Edit category**, **Ask AI**, **Re-file**, and **Skip** (via command actions or interactive mode). |
 | F33 | The **Re-file** action shall move a previously filed document to the corrected `YYYY/MM/<category>/` path and update the database record accordingly, including a `last_reviewed_at` timestamp. |
 | F34 | The **Ask AI** action shall invoke a local lightweight AI model to suggest date and/or category values; it is available for any document regardless of its current confidence level. |
 | F35 | The AI suggestion shall be shown as a proposed value with a brief rationale; the user must explicitly confirm or reject it before it is applied. |

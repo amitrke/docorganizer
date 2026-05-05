@@ -1,5 +1,5 @@
 ai:
-  enabled: false
+  enabled: true
   model: mistral:7b-instruct
   ollama_url: http://localhost:11434
 categories:

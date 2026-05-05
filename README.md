@@ -27,7 +27,9 @@ python -m venv .venv
 pip install -e .
 ```
 
-> **OCR support** (Phase 2): `pip install -e ".[ocr]"` — also requires Tesseract installed on the system.
+> **OCR support**: `pip install -e ".[ocr]"` — also requires Tesseract installed on the system.
+>
+> When a PDF page has no selectable text, docorganizer automatically falls back to OCR for that page.
 
 ---
 
@@ -56,7 +58,10 @@ Process one or more specific PDFs right now, without the watcher.
 ```sh
 docorg process scans/invoice.pdf
 docorg process scans/invoice.pdf scans/statement.pdf
+docorg process scans/invoice.pdf --mode interactive
 ```
+
+Interactive mode lets you file as-is, edit detected date/category, ask AI (on-demand), or skip.
 
 ### Search indexed documents
 
@@ -77,6 +82,20 @@ Categories are stored in `config.yaml`. These commands edit the file directly �
 docorg category list
 docorg category add transport
 docorg category remove transport
+```
+
+### Review and correction workflow
+
+Review indexed documents, edit metadata, trigger AI suggestions on demand, and re-file corrected documents.
+
+```sh
+docorg review list --status all
+docorg review set-date 12 2026-05-01
+docorg review set-category 12 health
+docorg review ask-ai 12
+docorg review ask-ai 12 --apply
+docorg review refile 12
+docorg review skip 12
 ```
 
 ---
@@ -159,11 +178,11 @@ Date detection priority is: filename date -> keyword-prefixed text date -> gener
 | Phase | Status | Deliverable |
 |-------|--------|-------------|
 | 1 | ✅ Done | File watcher → text extraction → SQLite storage → folder move |
-| 2 | Planned | OCR fallback (Tesseract) |
-| 3 | Planned | Date detection via regex and keyword heuristics |
-| 4 | Planned | Category management + mapping rules + category-aware filing |
-| 5 | Planned | Interactive ingestion mode (`--mode interactive`) |
-| 6 | Planned | TUI review menu (`docorg review`) |
-| 7 | Planned | AI-assisted classification (Ollama, on-demand) |
-| 8 | Planned | CLI search (FTS5 already wired in Phase 1) |
+| 2 | ✅ Done | OCR fallback for non-searchable pages (Tesseract) |
+| 3 | ✅ Done | Date detection via regex + keyword heuristics + filename priority |
+| 4 | ✅ Done | Category management + mapping rules + category-aware filing |
+| 5 | ✅ Done | Interactive ingestion mode (`docorg process --mode interactive`) |
+| 6 | ✅ Done (CLI) | Review workflow (`docorg review ...`) for edit, skip, and re-file |
+| 7 | ✅ Done (on-demand) | AI-assisted suggestions via Ollama (`docorg review ask-ai`, interactive ask-ai) |
+| 8 | ✅ Done | CLI search via SQLite FTS5 (`docorg search`) |
 | 9 | Future  | FastAPI backend + React UI |
