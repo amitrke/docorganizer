@@ -16,7 +16,7 @@ from textual.containers import Container, Horizontal, ScrollableContainer, Verti
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Static
 
-from .database import get_connection, list_documents, update_document_fields
+from .database import get_connection, list_documents, parse_extracted_fields, update_document_fields
 from .filer import file_document
 
 
@@ -121,9 +121,16 @@ class AiSuggestionScreen(ModalScreen[bool]):
         date_str = s.get("date") or "(none)"
         cat_str = s.get("category") or "(none)"
         rationale = s.get("rationale") or ""
+        summary = s.get("summary") or ""
+        fields = s.get("fields") or {}
         body = f"Date:     {date_str}\nCategory: {cat_str}"
         if rationale:
             body += f"\n\nRationale: {rationale}"
+        if summary:
+            body += f"\n\nSummary: {summary}"
+        if fields:
+            rendered_fields = "\n".join(f"{name}: {value}" for name, value in fields.items())
+            body += f"\n\nFields:\n{rendered_fields}"
         with Vertical(id="dialog"):
             yield Label("[bold]AI Suggestion[/bold]")
             yield Static(body, id="body")
@@ -212,6 +219,7 @@ class DetailPanel(ScrollableContainer):
         if row is None:
             widget.update("[dim]No document selected.[/dim]")
             return
+        extracted_fields = parse_extracted_fields(row["extracted_fields"])
         lines = [
             f"[bold]#{row['id']} — {row['filename']}[/bold]",
             "",
@@ -221,18 +229,40 @@ class DetailPanel(ScrollableContainer):
             f"[bold]Status:[/bold]    {row['filing_status']}",
             f"[bold]Skipped:[/bold]   {'[yellow]yes[/yellow]' if row['skipped'] else 'no'}",
             "",
-            f"[bold]Path:[/bold]",
-            f"  [dim]{row['filepath']}[/dim]",
-            "",
             f"[bold]Reviewed:[/bold]  {row['last_reviewed_at'] or '[dim](never)[/dim]'}",
             f"[bold]Created:[/bold]   {row['created_at']}",
+        ]
+        if row["ai_rationale"]:
+            lines.extend([
+                "",
+                f"[bold]AI Rationale:[/bold] {row['ai_rationale']}",
+            ])
+        if row["ai_summary"]:
+            lines.extend([
+                "",
+                "[bold]AI Summary:[/bold]",
+                row["ai_summary"],
+            ])
+        if extracted_fields:
+            lines.extend([
+                "",
+                "[bold]Extracted Fields:[/bold]",
+            ])
+            lines.extend(
+                f"  {field_name}: {field_value}"
+                for field_name, field_value in extracted_fields.items()
+            )
+        lines.extend([
+            "",
+            f"[bold]Path:[/bold]",
+            f"  [dim]{row['filepath']}[/dim]",
             "",
             "[dim]d[/dim] edit date  "
             "[dim]c[/dim] edit category  "
             "[dim]a[/dim] ask AI  "
             "[dim]r[/dim] refile  "
             "[dim]s[/dim] skip/unskip",
-        ]
+        ])
         widget.update("\n".join(lines))
 
 
@@ -418,6 +448,7 @@ class ReviewApp(App):
                     doc_id,
                     detected_date=value or None,
                     classification_source="manual",
+                    clear_ai_metadata=True,
                     skipped=0,
                 )
             self._selected_id = doc_id
@@ -449,6 +480,7 @@ class ReviewApp(App):
                     doc_id,
                     category=value or None,
                     classification_source="manual",
+                    clear_ai_metadata=True,
                     skipped=0,
                 )
             self._selected_id = doc_id
@@ -503,6 +535,9 @@ class ReviewApp(App):
                     detected_date=suggestion.get("date"),
                     category=suggestion.get("category"),
                     classification_source="ai",
+                    ai_rationale=suggestion.get("rationale") or None,
+                    ai_summary=suggestion.get("summary") or None,
+                    extracted_fields=suggestion.get("fields") or None,
                     skipped=0,
                 )
             self._selected_id = doc_id

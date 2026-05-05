@@ -45,11 +45,19 @@ def _parse_iso_date(value: str | None) -> date | None:
     return date.fromisoformat(value)
 
 
-def _interactive_adjustments(pdf: Path, cfg: dict, conn) -> tuple[date | None, str | None, str | None, bool]:
+def _interactive_adjustments(pdf: Path, cfg: dict, conn) -> tuple[
+    date | None,
+    str | None,
+    str | None,
+    str | None,
+    str | None,
+    dict[str, str] | None,
+    bool,
+]:
     analysis = analyze_pdf(pdf, cfg=cfg, conn=conn)
     if analysis["status"] == "duplicate":
         click.echo(f"[duplicate] {analysis['path']} — skipped.")
-        return None, None, None, True
+        return None, None, None, None, None, None, True
 
     click.echo(
         f"[analyzed]  {analysis['filename']}\n"
@@ -61,6 +69,9 @@ def _interactive_adjustments(pdf: Path, cfg: dict, conn) -> tuple[date | None, s
     detected_date = analysis["detected_date"]
     category = analysis["category"]
     source = analysis["classification_source"]
+    ai_rationale: str | None = None
+    ai_summary: str | None = None
+    extracted_fields: dict[str, str] | None = None
 
     while True:
         action = click.prompt(
@@ -76,9 +87,25 @@ def _interactive_adjustments(pdf: Path, cfg: dict, conn) -> tuple[date | None, s
         )
 
         if action == "file":
-            return _parse_iso_date(detected_date), category, source, False
+            return (
+                _parse_iso_date(detected_date),
+                category,
+                source,
+                ai_rationale,
+                ai_summary,
+                extracted_fields,
+                False,
+            )
         if action == "skip":
-            return _parse_iso_date(detected_date), category, source, True
+            return (
+                _parse_iso_date(detected_date),
+                category,
+                source,
+                ai_rationale,
+                ai_summary,
+                extracted_fields,
+                True,
+            )
         if action == "edit-date":
             new_date = click.prompt("Enter date (YYYY-MM-DD)", default=detected_date or "")
             detected_date = new_date or None
@@ -107,10 +134,19 @@ def _interactive_adjustments(pdf: Path, cfg: dict, conn) -> tuple[date | None, s
             )
             if ai_suggestion.get("rationale"):
                 click.echo(f"Rationale: {ai_suggestion['rationale']}")
+            if ai_suggestion.get("summary"):
+                click.echo(f"Summary: {ai_suggestion['summary']}")
+            if ai_suggestion.get("fields"):
+                click.echo("Extracted fields:")
+                for field_name, field_value in ai_suggestion["fields"].items():
+                    click.echo(f"  {field_name}: {field_value}")
             if click.confirm("Apply AI suggestion?", default=True):
                 detected_date = ai_suggestion["date"]
                 category = ai_suggestion["category"]
                 source = "ai"
+                ai_rationale = ai_suggestion.get("rationale") or None
+                ai_summary = ai_suggestion.get("summary") or None
+                extracted_fields = ai_suggestion.get("fields") or None
             continue
 
 
@@ -138,7 +174,15 @@ def process(pdf_files: tuple[Path, ...], config: str, mode: str | None) -> None:
     with get_connection(cfg["paths"]["database"]) as conn:
         for pdf in pdf_files:
             if selected_mode == "interactive":
-                override_date, override_category, override_source, skip = _interactive_adjustments(pdf, cfg, conn)
+                (
+                    override_date,
+                    override_category,
+                    override_source,
+                    override_ai_rationale,
+                    override_ai_summary,
+                    override_extracted_fields,
+                    skip,
+                ) = _interactive_adjustments(pdf, cfg, conn)
                 if skip and override_date is None and override_category is None and override_source is None:
                     continue
                 result = process_pdf(
@@ -148,6 +192,9 @@ def process(pdf_files: tuple[Path, ...], config: str, mode: str | None) -> None:
                     override_date=override_date,
                     override_category=override_category,
                     override_source=override_source,
+                    override_ai_rationale=override_ai_rationale,
+                    override_ai_summary=override_ai_summary,
+                    override_extracted_fields=override_extracted_fields,
                     skip=skip,
                 )
             else:
@@ -301,6 +348,7 @@ def review_set_date(config: str, doc_id: int, new_date: str) -> None:
             doc_id,
             detected_date=new_date,
             classification_source="manual",
+            clear_ai_metadata=True,
             skipped=0,
         )
     click.echo(f"Updated doc #{doc_id} date -> {new_date}")
@@ -319,6 +367,7 @@ def review_set_category(config: str, doc_id: int, new_category: str) -> None:
             doc_id,
             category=category_value,
             classification_source="manual",
+            clear_ai_metadata=True,
             skipped=0,
         )
     click.echo(f"Updated doc #{doc_id} category -> {category_value or '(none)'}")
@@ -363,6 +412,12 @@ def review_ask_ai(config: str, apply: bool, doc_id: int) -> None:
         )
         if suggestion.get("rationale"):
             click.echo(f"Rationale: {suggestion['rationale']}")
+        if suggestion.get("summary"):
+            click.echo(f"Summary: {suggestion['summary']}")
+        if suggestion.get("fields"):
+            click.echo("Extracted fields:")
+            for field_name, field_value in suggestion["fields"].items():
+                click.echo(f"  {field_name}: {field_value}")
 
         if apply:
             update_document_fields(
@@ -371,6 +426,9 @@ def review_ask_ai(config: str, apply: bool, doc_id: int) -> None:
                 detected_date=suggestion["date"],
                 category=suggestion["category"],
                 classification_source="ai",
+                ai_rationale=suggestion.get("rationale") or None,
+                ai_summary=suggestion.get("summary") or None,
+                extracted_fields=suggestion.get("fields") or None,
                 skipped=0,
             )
             click.echo("Applied AI suggestion.")

@@ -7,7 +7,7 @@ A Python CLI tool that ingests scanned PDF documents, extracts their text, organ
 ## Requirements
 
 - Python 3.10+
-- [Ollama](https://ollama.com) (optional — only needed for AI-assisted classification)
+- [Ollama](https://ollama.com) (optional — only needed for AI-assisted classification and field extraction)
 
 ---
 
@@ -61,7 +61,7 @@ docorg process scans/invoice.pdf scans/statement.pdf
 docorg process scans/invoice.pdf --mode interactive
 ```
 
-Interactive mode lets you file as-is, edit detected date/category, ask AI (on-demand), or skip.
+Interactive mode lets you file as-is, edit detected date/category, ask AI (on-demand), or skip. When AI is used, docorganizer can also store a rationale, a detailed summary, and extracted key-value facts.
 
 ### Search indexed documents
 
@@ -179,7 +179,7 @@ ai:
   ollama_url: http://localhost:11434
 ```
 
-To use AI-assisted classification, set `ai.enabled: true` and ensure Ollama is running with your chosen model pulled (`ollama pull mistral:7b-instruct`).
+To use AI-assisted classification, set `ai.enabled: true` and ensure Ollama is running with your chosen model pulled (`ollama pull mistral:7b-instruct`). AI suggestions can also persist a detailed summary plus extracted fields such as `total_amount`, `location`, or other explicit document facts when the model can find them reliably.
 
 Date detection priority is: filename date -> keyword-prefixed text date -> generic text date -> file modified date fallback.
 

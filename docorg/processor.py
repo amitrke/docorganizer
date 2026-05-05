@@ -82,6 +82,9 @@ def process_pdf(
     override_date=None,
     override_category: str | None = None,
     override_source: str | None = None,
+    override_ai_rationale: str | None = None,
+    override_ai_summary: str | None = None,
+    override_extracted_fields: dict[str, str] | None = None,
     skip: bool = False,
 ) -> dict:
     """
@@ -115,6 +118,9 @@ def process_pdf(
         category = override_category
     if override_source is not None:
         classification_source = override_source
+    ai_rationale = override_ai_rationale if override_source == "ai" else None
+    ai_summary = override_ai_summary if override_source == "ai" else None
+    extracted_fields = override_extracted_fields if override_source == "ai" else None
 
     # Step 4: insert pending record
     doc_id = insert_document(
@@ -125,6 +131,9 @@ def process_pdf(
         detected_date=doc_date.isoformat() if doc_date else None,
         category=category,
         classification_source=classification_source,
+        ai_rationale=ai_rationale,
+        ai_summary=ai_summary,
+        extracted_fields=extracted_fields,
         filing_status="pending",
         skipped=1 if skip else 0,
     )

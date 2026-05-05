@@ -6,7 +6,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, HTMLResponse
 
-from .database import get_connection, get_document_by_id, list_documents, search_documents
+from .database import get_connection, get_document_by_id, list_documents, parse_extracted_fields, search_documents
 
 
 def _fmt(value: object | None, default: str = "(none)") -> str:
@@ -232,6 +232,35 @@ def _render_detail(row, file_exists: bool) -> str:
             'target="_blank" rel="noopener noreferrer">Open Document</a>'
         )
 
+    extracted_fields = parse_extracted_fields(row["extracted_fields"])
+    ai_sections: list[str] = []
+    if row["ai_rationale"]:
+        ai_sections.append(
+            '<section class="ai-card">'
+            "<strong>AI rationale</strong>"
+            f"<p>{escape(row['ai_rationale'])}</p>"
+            "</section>"
+        )
+    if row["ai_summary"]:
+        ai_sections.append(
+            '<section class="ai-card">'
+            "<strong>Detailed summary</strong>"
+            f"<p>{escape(row['ai_summary'])}</p>"
+            "</section>"
+        )
+    if extracted_fields:
+        field_rows = "".join(
+            f"<div><dt>{escape(field_name.replace('_', ' ').title())}</dt><dd>{escape(field_value)}</dd></div>"
+            for field_name, field_value in extracted_fields.items()
+        )
+        ai_sections.append(
+            '<section class="ai-card">'
+            "<strong>Extracted fields</strong>"
+            f'<dl class="field-grid">{field_rows}</dl>'
+            "</section>"
+        )
+    ai_block = f'<div class="ai-stack">{"".join(ai_sections)}</div>' if ai_sections else ""
+
     return f"""
 <!doctype html>
 <html lang="en">
@@ -271,6 +300,42 @@ def _render_detail(row, file_exists: bool) -> str:
         }}
         dt {{ color: #6c5f53; font-weight: 600; }}
         dd {{ margin: 0; overflow-wrap: anywhere; }}
+        .ai-stack {{
+            display: grid;
+            gap: 12px;
+            margin-bottom: 20px;
+        }}
+        .ai-card {{
+            padding: 14px 16px;
+            border-radius: 12px;
+            background: #edf7f2;
+            border: 1px solid #b3ddc8;
+        }}
+        .ai-card strong {{
+            display: block;
+            color: #2f6f73;
+            margin-bottom: 6px;
+            font-size: 0.9rem;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+        }}
+        .ai-card p {{ margin: 0; line-height: 1.5; }}
+        .field-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 10px 14px;
+            margin: 0;
+        }}
+        .field-grid div {{
+            padding: 10px 12px;
+            background: rgba(255, 255, 255, 0.55);
+            border-radius: 10px;
+        }}
+        .field-grid dt {{
+            color: #4f665f;
+            margin-bottom: 4px;
+        }}
+        .field-grid dd {{ margin: 0; }}
         .toolbar {{ display: flex; gap: 10px; flex-wrap: wrap; }}
         .btn {{
             display: inline-block;
@@ -299,6 +364,7 @@ def _render_detail(row, file_exists: bool) -> str:
 <body>
     <main>
         <h1>Document #{row['id']} - {escape(_fmt(row['filename']))}</h1>
+        {ai_block}
         <dl>
             <dt>Date</dt><dd>{escape(_fmt(row['detected_date']))}</dd>
             <dt>Category</dt><dd>{escape(_fmt(row['category']))}</dd>

@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from pathlib import Path
 
@@ -11,6 +12,9 @@ CREATE TABLE IF NOT EXISTS documents (
     detected_date        TEXT,
     category             TEXT,
     classification_source TEXT NOT NULL DEFAULT 'rules',
+    ai_rationale         TEXT,
+    ai_summary           TEXT,
+    extracted_fields     TEXT,
     filing_status        TEXT NOT NULL DEFAULT 'pending',
     last_reviewed_at     TEXT,
     skipped              INTEGER NOT NULL DEFAULT 0,
@@ -53,26 +57,73 @@ def get_connection(db_path: str | Path) -> sqlite3.Connection:
     return conn
 
 
+def serialize_extracted_fields(fields: dict[str, str] | None) -> str | None:
+    if not fields:
+        return None
+    cleaned = {
+        str(key): str(value)
+        for key, value in fields.items()
+        if str(key).strip() and str(value).strip()
+    }
+    if not cleaned:
+        return None
+    return json.dumps(cleaned, sort_keys=True)
+
+
+def parse_extracted_fields(raw: str | None) -> dict[str, str]:
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {
+        str(key): str(value)
+        for key, value in parsed.items()
+        if str(key).strip() and value is not None and str(value).strip()
+    }
+
+
+def _migrate(conn) -> None:
+    """Apply incremental schema changes to existing databases."""
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(documents)")}
+    if "ai_rationale" not in existing:
+        conn.execute("ALTER TABLE documents ADD COLUMN ai_rationale TEXT")
+    if "ai_summary" not in existing:
+        conn.execute("ALTER TABLE documents ADD COLUMN ai_summary TEXT")
+    if "extracted_fields" not in existing:
+        conn.execute("ALTER TABLE documents ADD COLUMN extracted_fields TEXT")
+    conn.commit()
+
+
 def init_db(db_path: str | Path) -> None:
     """Create tables and triggers if they do not already exist."""
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     with get_connection(db_path) as conn:
         conn.executescript(DDL)
+        _migrate(conn)
 
 
 def insert_document(conn: sqlite3.Connection, *, filename: str, filepath: str,
                     extracted_text: str, detected_date: str | None,
                     category: str | None, classification_source: str = "rules",
+                    ai_rationale: str | None = None,
+                    ai_summary: str | None = None,
+                    extracted_fields: dict[str, str] | None = None,
                     filing_status: str = "pending", skipped: int = 0) -> int:
     cur = conn.execute(
         """
         INSERT INTO documents
             (filename, filepath, extracted_text, detected_date,
-               category, classification_source, filing_status, skipped)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               category, classification_source, ai_rationale, ai_summary,
+               extracted_fields, filing_status, skipped)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (filename, filepath, extracted_text, detected_date,
-            category, classification_source, filing_status, skipped),
+            category, classification_source, ai_rationale, ai_summary,
+            serialize_extracted_fields(extracted_fields), filing_status, skipped),
     )
     conn.commit()
     return cur.lastrowid
@@ -147,9 +198,13 @@ def update_document_fields(conn: sqlite3.Connection, doc_id: int, *,
                            detected_date: str | None = None,
                            category: str | None = None,
                            classification_source: str | None = None,
+                           ai_rationale: str | None = None,
+                           ai_summary: str | None = None,
+                           extracted_fields: dict[str, str] | None = None,
                            filepath: str | None = None,
                            filing_status: str | None = None,
                            skipped: int | None = None,
+                           clear_ai_metadata: bool = False,
                            touch_reviewed_at: bool = True) -> None:
     updates: list[str] = []
     params: list[object] = []
@@ -163,6 +218,15 @@ def update_document_fields(conn: sqlite3.Connection, doc_id: int, *,
     if classification_source is not None:
         updates.append("classification_source = ?")
         params.append(classification_source)
+    if ai_rationale is not None:
+        updates.append("ai_rationale = ?")
+        params.append(ai_rationale)
+    if ai_summary is not None:
+        updates.append("ai_summary = ?")
+        params.append(ai_summary)
+    if extracted_fields is not None:
+        updates.append("extracted_fields = ?")
+        params.append(serialize_extracted_fields(extracted_fields))
     if filepath is not None:
         updates.append("filepath = ?")
         params.append(filepath)
@@ -172,6 +236,10 @@ def update_document_fields(conn: sqlite3.Connection, doc_id: int, *,
     if skipped is not None:
         updates.append("skipped = ?")
         params.append(skipped)
+    if clear_ai_metadata:
+        updates.append("ai_rationale = NULL")
+        updates.append("ai_summary = NULL")
+        updates.append("extracted_fields = NULL")
     if touch_reviewed_at:
         updates.append("last_reviewed_at = strftime('%Y-%m-%dT%H:%M:%S', 'now')")
 
