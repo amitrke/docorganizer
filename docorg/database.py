@@ -8,9 +8,12 @@ CREATE TABLE IF NOT EXISTS documents (
     id                   INTEGER PRIMARY KEY AUTOINCREMENT,
     filename             TEXT NOT NULL,
     filepath             TEXT NOT NULL UNIQUE,
+    content_hash         TEXT,
+    file_size            INTEGER,
     extracted_text       TEXT,
     detected_date        TEXT,
     category             TEXT,
+    ai_suggested_category TEXT,
     classification_source TEXT NOT NULL DEFAULT 'rules',
     ai_rationale         TEXT,
     ai_summary           TEXT,
@@ -46,6 +49,8 @@ CREATE TRIGGER IF NOT EXISTS documents_ad AFTER DELETE ON documents BEGIN
     INSERT INTO documents_fts(documents_fts, rowid, filename, extracted_text)
     VALUES ('delete', old.id, old.filename, old.extracted_text);
 END;
+
+CREATE INDEX IF NOT EXISTS idx_documents_content_hash ON documents(content_hash);
 """
 
 
@@ -89,12 +94,19 @@ def parse_extracted_fields(raw: str | None) -> dict[str, str]:
 def _migrate(conn) -> None:
     """Apply incremental schema changes to existing databases."""
     existing = {row[1] for row in conn.execute("PRAGMA table_info(documents)")}
+    if "content_hash" not in existing:
+        conn.execute("ALTER TABLE documents ADD COLUMN content_hash TEXT")
+    if "file_size" not in existing:
+        conn.execute("ALTER TABLE documents ADD COLUMN file_size INTEGER")
     if "ai_rationale" not in existing:
         conn.execute("ALTER TABLE documents ADD COLUMN ai_rationale TEXT")
     if "ai_summary" not in existing:
         conn.execute("ALTER TABLE documents ADD COLUMN ai_summary TEXT")
     if "extracted_fields" not in existing:
         conn.execute("ALTER TABLE documents ADD COLUMN extracted_fields TEXT")
+    if "ai_suggested_category" not in existing:
+        conn.execute("ALTER TABLE documents ADD COLUMN ai_suggested_category TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_content_hash ON documents(content_hash)")
     conn.commit()
 
 
@@ -107,8 +119,11 @@ def init_db(db_path: str | Path) -> None:
 
 
 def insert_document(conn: sqlite3.Connection, *, filename: str, filepath: str,
+                    content_hash: str | None = None,
+                    file_size: int | None = None,
                     extracted_text: str, detected_date: str | None,
                     category: str | None, classification_source: str = "rules",
+                    ai_suggested_category: str | None = None,
                     ai_rationale: str | None = None,
                     ai_summary: str | None = None,
                     extracted_fields: dict[str, str] | None = None,
@@ -116,13 +131,13 @@ def insert_document(conn: sqlite3.Connection, *, filename: str, filepath: str,
     cur = conn.execute(
         """
         INSERT INTO documents
-            (filename, filepath, extracted_text, detected_date,
-               category, classification_source, ai_rationale, ai_summary,
+            (filename, filepath, content_hash, file_size, extracted_text, detected_date,
+               category, ai_suggested_category, classification_source, ai_rationale, ai_summary,
                extracted_fields, filing_status, skipped)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (filename, filepath, extracted_text, detected_date,
-            category, classification_source, ai_rationale, ai_summary,
+        (filename, filepath, content_hash, file_size, extracted_text, detected_date,
+            category, ai_suggested_category, classification_source, ai_rationale, ai_summary,
             serialize_extracted_fields(extracted_fields), filing_status, skipped),
     )
     conn.commit()
@@ -132,6 +147,13 @@ def insert_document(conn: sqlite3.Connection, *, filename: str, filepath: str,
 def document_exists(conn: sqlite3.Connection, filepath: str) -> bool:
     row = conn.execute(
         "SELECT 1 FROM documents WHERE filepath = ?", (filepath,)
+    ).fetchone()
+    return row is not None
+
+
+def document_exists_by_hash(conn: sqlite3.Connection, content_hash: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM documents WHERE content_hash = ? LIMIT 1", (content_hash,)
     ).fetchone()
     return row is not None
 
@@ -194,9 +216,18 @@ def get_document_by_id(conn: sqlite3.Connection, doc_id: int) -> sqlite3.Row | N
     ).fetchone()
 
 
+def list_categories(conn: sqlite3.Connection) -> list[str]:
+    """Return all distinct non-null category values stored in the database."""
+    rows = conn.execute(
+        "SELECT DISTINCT category FROM documents WHERE category IS NOT NULL ORDER BY category"
+    ).fetchall()
+    return [row[0] for row in rows]
+
+
 def update_document_fields(conn: sqlite3.Connection, doc_id: int, *,
                            detected_date: str | None = None,
                            category: str | None = None,
+                           ai_suggested_category: str | None = None,
                            classification_source: str | None = None,
                            ai_rationale: str | None = None,
                            ai_summary: str | None = None,
@@ -215,6 +246,9 @@ def update_document_fields(conn: sqlite3.Connection, doc_id: int, *,
     if category is not None:
         updates.append("category = ?")
         params.append(category)
+    if ai_suggested_category is not None:
+        updates.append("ai_suggested_category = ?")
+        params.append(ai_suggested_category)
     if classification_source is not None:
         updates.append("classification_source = ?")
         params.append(classification_source)
@@ -237,6 +271,7 @@ def update_document_fields(conn: sqlite3.Connection, doc_id: int, *,
         updates.append("skipped = ?")
         params.append(skipped)
     if clear_ai_metadata:
+        updates.append("ai_suggested_category = NULL")
         updates.append("ai_rationale = NULL")
         updates.append("ai_summary = NULL")
         updates.append("extracted_fields = NULL")

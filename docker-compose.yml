@@ -1,8 +1,8 @@
 services:
   docorg-web:
-    build: .
+    # build: .
     # Or use a pre-built image:
-    # image: your-registry/docorg-web:latest
+    image: ghcr.io/amitrke/docorganizer-web:latest
     container_name: docorg-web
     restart: unless-stopped
     ports:

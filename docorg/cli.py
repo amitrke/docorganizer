@@ -127,7 +127,8 @@ def _interactive_adjustments(pdf: Path, cfg: dict, conn) -> tuple[
                 ai_cfg=cfg.get("ai", {}),
             )
             if not ai_suggestion:
-                click.echo("AI suggestion unavailable (check ai.enabled and Ollama).")
+                reason = getattr(suggest_date_category, "last_error", "")
+                click.echo(f"AI suggestion unavailable: {reason}" if reason else "AI suggestion unavailable (check ai.enabled and Ollama).")
                 continue
             click.echo(
                 f"AI suggestion: date={ai_suggestion['date'] or '(none)'}  "
@@ -374,6 +375,51 @@ def review_clear_legacy(config: str, apply: bool, limit: int) -> None:
         click.echo(f"Deleted {len(legacy_rows)} legacy row(s).")
 
 
+@review.command("delete")
+@click.option("--config", default="config.yaml", show_default=True)
+@click.option("--apply", is_flag=True,
+              help="Delete the selected DB rows. Without this flag, runs as preview.")
+@click.argument("doc_ids", type=int, nargs=-1)
+def review_delete(config: str, apply: bool, doc_ids: tuple[int, ...]) -> None:
+    """Preview or delete one or more document rows by ID."""
+    if not doc_ids:
+        raise click.UsageError("Provide at least one document ID to delete.")
+
+    cfg = _resolve_config(config)
+    requested_ids = sorted(set(doc_ids))
+
+    with get_connection(cfg["paths"]["database"]) as conn:
+        placeholders = ", ".join("?" for _ in requested_ids)
+        rows = conn.execute(
+            f"SELECT id, filename, filepath FROM documents WHERE id IN ({placeholders}) ORDER BY id",
+            requested_ids,
+        ).fetchall()
+
+        found_ids = {row["id"] for row in rows}
+        missing_ids = [doc_id for doc_id in requested_ids if doc_id not in found_ids]
+
+        if not rows:
+            click.echo("No matching document rows found.")
+            return
+
+        click.echo(f"Matched {len(rows)} row(s):")
+        for row in rows:
+            click.echo(f"  #{row['id']:<4} {row['filename']:<35} {row['filepath']}")
+        if missing_ids:
+            click.echo(f"Missing IDs: {', '.join(str(doc_id) for doc_id in missing_ids)}")
+
+        if not apply:
+            click.echo("Re-run with --apply to delete these rows from the DB.")
+            return
+
+        conn.executemany(
+            "DELETE FROM documents WHERE id = ?",
+            [(row["id"],) for row in rows],
+        )
+        conn.commit()
+        click.echo(f"Deleted {len(rows)} row(s).")
+
+
 @review.command("set-date")
 @click.option("--config", default="config.yaml", show_default=True)
 @click.argument("doc_id", type=int)
@@ -387,7 +433,6 @@ def review_set_date(config: str, doc_id: int, new_date: str) -> None:
             doc_id,
             detected_date=new_date,
             classification_source="manual",
-            clear_ai_metadata=True,
             skipped=0,
         )
     click.echo(f"Updated doc #{doc_id} date -> {new_date}")
@@ -406,7 +451,6 @@ def review_set_category(config: str, doc_id: int, new_category: str) -> None:
             doc_id,
             category=category_value,
             classification_source="manual",
-            clear_ai_metadata=True,
             skipped=0,
         )
     click.echo(f"Updated doc #{doc_id} category -> {category_value or '(none)'}")
@@ -442,7 +486,8 @@ def review_ask_ai(config: str, apply: bool, doc_id: int) -> None:
         )
 
         if not suggestion:
-            click.echo("AI suggestion unavailable (check ai.enabled and Ollama).")
+            reason = getattr(suggest_date_category, "last_error", "")
+            click.echo(f"AI suggestion unavailable: {reason}" if reason else "AI suggestion unavailable (check ai.enabled and Ollama).")
             return
 
         click.echo(
@@ -464,6 +509,7 @@ def review_ask_ai(config: str, apply: bool, doc_id: int) -> None:
                 doc_id,
                 detected_date=suggestion["date"],
                 category=suggestion["category"],
+                ai_suggested_category=suggestion.get("category") or None,
                 classification_source="ai",
                 ai_rationale=suggestion.get("rationale") or None,
                 ai_summary=suggestion.get("summary") or None,
@@ -471,6 +517,130 @@ def review_ask_ai(config: str, apply: bool, doc_id: int) -> None:
                 skipped=0,
             )
             click.echo("Applied AI suggestion.")
+
+
+@review.command("ask-ai-bulk")
+@click.option("--config", default="config.yaml", show_default=True)
+@click.option("--apply", is_flag=True,
+              help="Apply AI suggestions to all matched rows. Without this flag, runs as preview.")
+@click.option("--status", type=click.Choice(["all", "pending", "filed"], case_sensitive=False),
+              default="all", show_default=True)
+@click.option("--source-filter",
+              type=click.Choice(["all", "not-ai", "ai", "manual", "rules", "fallback"], case_sensitive=False),
+              default="not-ai", show_default=True,
+              help="Filter by current classification source.")
+@click.option("--category", default=None, help="Filter by current category.")
+@click.option("--from-date", default=None, help="Detected date lower bound (YYYY-MM-DD).")
+@click.option("--to-date", default=None, help="Detected date upper bound (YYYY-MM-DD).")
+@click.option("--limit", default=0, show_default=True, type=int,
+              help="Max matched rows to process. 0 means no limit.")
+def review_ask_ai_bulk(
+    config: str,
+    apply: bool,
+    status: str,
+    source_filter: str,
+    category: str | None,
+    from_date: str | None,
+    to_date: str | None,
+    limit: int,
+) -> None:
+    """Preview or apply AI suggestions for multiple documents using filters."""
+    if from_date:
+        date.fromisoformat(from_date)
+    if to_date:
+        date.fromisoformat(to_date)
+
+    cfg = _resolve_config(config)
+    with get_connection(cfg["paths"]["database"]) as conn:
+        where_parts: list[str] = []
+        params: list[object] = []
+
+        if status in {"pending", "filed"}:
+            where_parts.append("filing_status = ?")
+            params.append(status)
+
+        if source_filter == "not-ai":
+            where_parts.append("classification_source <> 'ai'")
+        elif source_filter != "all":
+            where_parts.append("classification_source = ?")
+            params.append(source_filter)
+
+        if category:
+            where_parts.append("category = ?")
+            params.append(category)
+
+        if from_date:
+            where_parts.append("detected_date >= ?")
+            params.append(from_date)
+        if to_date:
+            where_parts.append("detected_date <= ?")
+            params.append(to_date)
+
+        where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+        limit_sql = "" if limit <= 0 else f"LIMIT {limit}"
+        rows = conn.execute(
+            f"""
+            SELECT id, filename, extracted_text, detected_date, category, classification_source
+            FROM documents
+            {where_sql}
+            ORDER BY id
+            {limit_sql}
+            """,
+            params,
+        ).fetchall()
+
+        if not rows:
+            click.echo("No matching documents for bulk ask-ai.")
+            return
+
+        click.echo(f"Matched {len(rows)} document(s).")
+
+        suggested_count = 0
+        applied_count = 0
+        failed_count = 0
+
+        for row in rows:
+            suggestion = suggest_date_category(
+                text=row["extracted_text"] or "",
+                filename=row["filename"],
+                categories=cfg.get("categories", []),
+                ai_cfg=cfg.get("ai", {}),
+            )
+            if not suggestion:
+                failed_count += 1
+                reason = getattr(suggest_date_category, "last_error", "")
+                click.echo(
+                    f"#{row['id']} failed: {reason or 'AI suggestion unavailable.'}"
+                )
+                continue
+
+            suggested_count += 1
+            click.echo(
+                f"#{row['id']} suggest date={suggestion['date'] or '(none)'} "
+                f"cat={suggestion['category'] or '(none)'}"
+            )
+
+            if apply:
+                update_document_fields(
+                    conn,
+                    row["id"],
+                    detected_date=suggestion.get("date"),
+                    category=suggestion.get("category"),
+                    ai_suggested_category=suggestion.get("category") or None,
+                    classification_source="ai",
+                    ai_rationale=suggestion.get("rationale") or None,
+                    ai_summary=suggestion.get("summary") or None,
+                    extracted_fields=suggestion.get("fields") or None,
+                    skipped=0,
+                )
+                applied_count += 1
+
+        click.echo(
+            f"Bulk ask-ai complete: matched={len(rows)} suggested={suggested_count} "
+            f"failed={failed_count} applied={applied_count}"
+        )
+        if not apply:
+            click.echo("Re-run with --apply to persist suggested values.")
 
 
 @review.command("tui")

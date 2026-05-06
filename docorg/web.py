@@ -6,7 +6,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, HTMLResponse
 
-from .database import get_connection, get_document_by_id, list_documents, parse_extracted_fields, search_documents
+from .database import get_connection, get_document_by_id, list_categories, list_documents, parse_extracted_fields, search_documents
 from .pathing import resolve_stored_path
 
 
@@ -71,9 +71,12 @@ def _resolve_db_filepath(filepath: str, cfg: dict, base_from: str | None,
     return _resolve_doc_path(translated)
 
 
-def _render_home(cfg: dict, query: str, status: str, category: str | None, rows: list) -> str:
+def _render_home(cfg: dict, query: str, status: str, category: str | None, rows: list,
+                 db_categories: list[str] | None = None) -> str:
     status_options = ["all", "pending", "filed"]
-    categories = cfg.get("categories", [])
+    cfg_cats = cfg.get("categories", [])
+    # Merge config-defined categories with any category values present in the DB
+    categories = sorted(set(cfg_cats) | set(db_categories or []))
 
     def _status_option(value: str) -> str:
         selected = " selected" if value == status else ""
@@ -449,6 +452,7 @@ def create_app(cfg: dict) -> FastAPI:
         category: str | None = Query(default=None),
     ) -> HTMLResponse:
         with get_connection(db_path) as conn:
+            db_categories = list_categories(conn)
             if q.strip():
                 rows = search_documents(conn, q.strip())
                 if status != "all":
@@ -457,7 +461,7 @@ def create_app(cfg: dict) -> FastAPI:
                     rows = [row for row in rows if row["category"] == category]
             else:
                 rows = list_documents(conn, status=status, category=category)
-        return HTMLResponse(_render_home(cfg, q, status, category, rows))
+        return HTMLResponse(_render_home(cfg, q, status, category, rows, db_categories=db_categories))
 
     @app.get("/documents/{doc_id}", response_class=HTMLResponse)
     def document_detail(doc_id: int) -> HTMLResponse:
