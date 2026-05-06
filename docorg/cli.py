@@ -509,6 +509,7 @@ def review_ask_ai(config: str, apply: bool, doc_id: int) -> None:
                 doc_id,
                 detected_date=suggestion["date"],
                 category=suggestion["category"],
+                ai_suggested_category=suggestion.get("category") or None,
                 classification_source="ai",
                 ai_rationale=suggestion.get("rationale") or None,
                 ai_summary=suggestion.get("summary") or None,

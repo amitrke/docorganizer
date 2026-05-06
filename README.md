@@ -116,6 +116,8 @@ docorg review clear-legacy --apply
 
 `docorg review ask-ai <id>` previews AI suggestions (date, category, rationale, summary, extracted fields) without saving. Add `--apply` to persist the results to the database.
 
+When applied, docorganizer stores both the final `category` and an `ai_suggested_category` value so you can keep AI provenance even after later manual category edits.
+
 ### Interactive TUI
 
 A full-screen terminal UI for browsing and editing all indexed documents.
@@ -211,6 +213,8 @@ ai:
   model: mistral:7b-instruct   # default (RTX 3080 / >=6 GB VRAM)
   # lighter alternatives: llama3.2:3b, phi3:mini
   ollama_url: http://localhost:11434
+  timeout: 180                 # seconds for Ollama response
+  max_tokens: 768              # response budget; increase if JSON gets truncated
 ```
 
 To use AI-assisted classification, set `ai.enabled: true` and ensure Ollama is running with your chosen model pulled (`ollama pull mistral:7b-instruct`). AI suggestions can also persist a detailed summary plus extracted fields such as `total_amount`, `location`, or other explicit document facts when the model can find them reliably.

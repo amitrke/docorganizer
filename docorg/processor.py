@@ -124,6 +124,7 @@ def process_pdf(
     ai_rationale = override_ai_rationale if override_source == "ai" else None
     ai_summary = override_ai_summary if override_source == "ai" else None
     extracted_fields = override_extracted_fields if override_source == "ai" else None
+    ai_suggested_category = category if classification_source == "ai" else None
 
     # Step 4: insert pending record
     doc_id = insert_document(
@@ -134,6 +135,7 @@ def process_pdf(
         detected_date=doc_date.isoformat() if doc_date else None,
         category=category,
         classification_source=classification_source,
+        ai_suggested_category=ai_suggested_category,
         ai_rationale=ai_rationale,
         ai_summary=ai_summary,
         extracted_fields=extracted_fields,

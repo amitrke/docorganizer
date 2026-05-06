@@ -68,8 +68,12 @@ def suggest_date_category(*, text: str, filename: str, categories: list[str], ai
     payload = {
         "model": model,
         "prompt": prompt,
+        "format": "json",
         "stream": False,
-        "options": {"temperature": 0.1},
+        "options": {
+            "temperature": 0.1,
+            "num_predict": int(ai_cfg.get("max_tokens", 768)),
+        },
     }
 
     req = request.Request(

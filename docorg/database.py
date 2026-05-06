@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS documents (
     extracted_text       TEXT,
     detected_date        TEXT,
     category             TEXT,
+    ai_suggested_category TEXT,
     classification_source TEXT NOT NULL DEFAULT 'rules',
     ai_rationale         TEXT,
     ai_summary           TEXT,
@@ -95,6 +96,8 @@ def _migrate(conn) -> None:
         conn.execute("ALTER TABLE documents ADD COLUMN ai_summary TEXT")
     if "extracted_fields" not in existing:
         conn.execute("ALTER TABLE documents ADD COLUMN extracted_fields TEXT")
+    if "ai_suggested_category" not in existing:
+        conn.execute("ALTER TABLE documents ADD COLUMN ai_suggested_category TEXT")
     conn.commit()
 
 
@@ -109,6 +112,7 @@ def init_db(db_path: str | Path) -> None:
 def insert_document(conn: sqlite3.Connection, *, filename: str, filepath: str,
                     extracted_text: str, detected_date: str | None,
                     category: str | None, classification_source: str = "rules",
+                    ai_suggested_category: str | None = None,
                     ai_rationale: str | None = None,
                     ai_summary: str | None = None,
                     extracted_fields: dict[str, str] | None = None,
@@ -117,12 +121,12 @@ def insert_document(conn: sqlite3.Connection, *, filename: str, filepath: str,
         """
         INSERT INTO documents
             (filename, filepath, extracted_text, detected_date,
-               category, classification_source, ai_rationale, ai_summary,
+               category, ai_suggested_category, classification_source, ai_rationale, ai_summary,
                extracted_fields, filing_status, skipped)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (filename, filepath, extracted_text, detected_date,
-            category, classification_source, ai_rationale, ai_summary,
+            category, ai_suggested_category, classification_source, ai_rationale, ai_summary,
             serialize_extracted_fields(extracted_fields), filing_status, skipped),
     )
     conn.commit()
@@ -197,6 +201,7 @@ def get_document_by_id(conn: sqlite3.Connection, doc_id: int) -> sqlite3.Row | N
 def update_document_fields(conn: sqlite3.Connection, doc_id: int, *,
                            detected_date: str | None = None,
                            category: str | None = None,
+                           ai_suggested_category: str | None = None,
                            classification_source: str | None = None,
                            ai_rationale: str | None = None,
                            ai_summary: str | None = None,
@@ -215,6 +220,9 @@ def update_document_fields(conn: sqlite3.Connection, doc_id: int, *,
     if category is not None:
         updates.append("category = ?")
         params.append(category)
+    if ai_suggested_category is not None:
+        updates.append("ai_suggested_category = ?")
+        params.append(ai_suggested_category)
     if classification_source is not None:
         updates.append("classification_source = ?")
         params.append(classification_source)
@@ -237,6 +245,7 @@ def update_document_fields(conn: sqlite3.Connection, doc_id: int, *,
         updates.append("skipped = ?")
         params.append(skipped)
     if clear_ai_metadata:
+        updates.append("ai_suggested_category = NULL")
         updates.append("ai_rationale = NULL")
         updates.append("ai_summary = NULL")
         updates.append("extracted_fields = NULL")
