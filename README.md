@@ -106,6 +106,8 @@ docorg review set-date 12 2026-05-01
 docorg review set-category 12 health
 docorg review ask-ai 12
 docorg review ask-ai 12 --apply
+docorg review ask-ai-bulk --status filed --source-filter not-ai
+docorg review ask-ai-bulk --source-filter not-ai --from-date 2025-01-01 --to-date 2025-12-31 --apply
 docorg review refile 12
 docorg review skip 12
 docorg review delete 12
@@ -115,6 +117,8 @@ docorg review clear-legacy --apply
 ```
 
 `docorg review ask-ai <id>` previews AI suggestions (date, category, rationale, summary, extracted fields) without saving. Add `--apply` to persist the results to the database.
+
+`docorg review ask-ai-bulk` runs AI suggestions over multiple rows using filters (`--status`, `--source-filter`, `--category`, `--from-date`, `--to-date`, `--limit`). It previews by default; add `--apply` to write changes.
 
 When applied, docorganizer stores both the final `category` and an `ai_suggested_category` value so you can keep AI provenance even after later manual category edits.
 

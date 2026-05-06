@@ -519,6 +519,130 @@ def review_ask_ai(config: str, apply: bool, doc_id: int) -> None:
             click.echo("Applied AI suggestion.")
 
 
+@review.command("ask-ai-bulk")
+@click.option("--config", default="config.yaml", show_default=True)
+@click.option("--apply", is_flag=True,
+              help="Apply AI suggestions to all matched rows. Without this flag, runs as preview.")
+@click.option("--status", type=click.Choice(["all", "pending", "filed"], case_sensitive=False),
+              default="all", show_default=True)
+@click.option("--source-filter",
+              type=click.Choice(["all", "not-ai", "ai", "manual", "rules", "fallback"], case_sensitive=False),
+              default="not-ai", show_default=True,
+              help="Filter by current classification source.")
+@click.option("--category", default=None, help="Filter by current category.")
+@click.option("--from-date", default=None, help="Detected date lower bound (YYYY-MM-DD).")
+@click.option("--to-date", default=None, help="Detected date upper bound (YYYY-MM-DD).")
+@click.option("--limit", default=0, show_default=True, type=int,
+              help="Max matched rows to process. 0 means no limit.")
+def review_ask_ai_bulk(
+    config: str,
+    apply: bool,
+    status: str,
+    source_filter: str,
+    category: str | None,
+    from_date: str | None,
+    to_date: str | None,
+    limit: int,
+) -> None:
+    """Preview or apply AI suggestions for multiple documents using filters."""
+    if from_date:
+        date.fromisoformat(from_date)
+    if to_date:
+        date.fromisoformat(to_date)
+
+    cfg = _resolve_config(config)
+    with get_connection(cfg["paths"]["database"]) as conn:
+        where_parts: list[str] = []
+        params: list[object] = []
+
+        if status in {"pending", "filed"}:
+            where_parts.append("filing_status = ?")
+            params.append(status)
+
+        if source_filter == "not-ai":
+            where_parts.append("classification_source <> 'ai'")
+        elif source_filter != "all":
+            where_parts.append("classification_source = ?")
+            params.append(source_filter)
+
+        if category:
+            where_parts.append("category = ?")
+            params.append(category)
+
+        if from_date:
+            where_parts.append("detected_date >= ?")
+            params.append(from_date)
+        if to_date:
+            where_parts.append("detected_date <= ?")
+            params.append(to_date)
+
+        where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+        limit_sql = "" if limit <= 0 else f"LIMIT {limit}"
+        rows = conn.execute(
+            f"""
+            SELECT id, filename, extracted_text, detected_date, category, classification_source
+            FROM documents
+            {where_sql}
+            ORDER BY id
+            {limit_sql}
+            """,
+            params,
+        ).fetchall()
+
+        if not rows:
+            click.echo("No matching documents for bulk ask-ai.")
+            return
+
+        click.echo(f"Matched {len(rows)} document(s).")
+
+        suggested_count = 0
+        applied_count = 0
+        failed_count = 0
+
+        for row in rows:
+            suggestion = suggest_date_category(
+                text=row["extracted_text"] or "",
+                filename=row["filename"],
+                categories=cfg.get("categories", []),
+                ai_cfg=cfg.get("ai", {}),
+            )
+            if not suggestion:
+                failed_count += 1
+                reason = getattr(suggest_date_category, "last_error", "")
+                click.echo(
+                    f"#{row['id']} failed: {reason or 'AI suggestion unavailable.'}"
+                )
+                continue
+
+            suggested_count += 1
+            click.echo(
+                f"#{row['id']} suggest date={suggestion['date'] or '(none)'} "
+                f"cat={suggestion['category'] or '(none)'}"
+            )
+
+            if apply:
+                update_document_fields(
+                    conn,
+                    row["id"],
+                    detected_date=suggestion.get("date"),
+                    category=suggestion.get("category"),
+                    ai_suggested_category=suggestion.get("category") or None,
+                    classification_source="ai",
+                    ai_rationale=suggestion.get("rationale") or None,
+                    ai_summary=suggestion.get("summary") or None,
+                    extracted_fields=suggestion.get("fields") or None,
+                    skipped=0,
+                )
+                applied_count += 1
+
+        click.echo(
+            f"Bulk ask-ai complete: matched={len(rows)} suggested={suggested_count} "
+            f"failed={failed_count} applied={applied_count}"
+        )
+        if not apply:
+            click.echo("Re-run with --apply to persist suggested values.")
+
+
 @review.command("tui")
 @click.option("--config", default="config.yaml", show_default=True)
 @click.option("--status", type=click.Choice(["all", "pending", "filed"], case_sensitive=False),
