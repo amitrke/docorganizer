@@ -2,14 +2,26 @@
 Core processing pipeline — runs for every incoming PDF.
 Called by both the file watcher (auto mode) and the CLI process command.
 """
+import hashlib
 import sqlite3
 from pathlib import Path
 
-from .database import document_exists, insert_document, update_filing
+from .database import document_exists, document_exists_by_hash, insert_document, update_filing
 from .date_detector import detect_date
 from .extractor import extract_text
 from .filer import file_document
 from .pathing import to_stored_path
+
+
+def _sha256_for_file(path: Path, *, chunk_size: int = 1024 * 1024) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as f:
+        while True:
+            chunk = f.read(chunk_size)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _build_analysis(pdf_path: Path, *, cfg: dict) -> dict:
@@ -37,8 +49,13 @@ def _build_analysis(pdf_path: Path, *, cfg: dict) -> dict:
 
 def analyze_pdf(pdf_path: str | Path, *, cfg: dict, conn: sqlite3.Connection) -> dict:
     pdf_path = Path(pdf_path)
+    content_hash = _sha256_for_file(pdf_path)
     stored_source_path = to_stored_path(pdf_path, cfg)
-    if document_exists(conn, stored_source_path) or document_exists(conn, str(pdf_path)):
+    if (
+        document_exists_by_hash(conn, content_hash)
+        or document_exists(conn, stored_source_path)
+        or document_exists(conn, str(pdf_path))
+    ):
         return {"status": "duplicate", "path": str(pdf_path)}
 
     analysis = _build_analysis(pdf_path, cfg=cfg)
@@ -102,10 +119,16 @@ def process_pdf(
     Returns a dict with processing results for display / TUI use.
     """
     pdf_path = Path(pdf_path)
+    content_hash = _sha256_for_file(pdf_path)
+    file_size = pdf_path.stat().st_size
     stored_source_path = to_stored_path(pdf_path, cfg)
 
     # NF3 — skip already-processed files
-    if document_exists(conn, stored_source_path) or document_exists(conn, str(pdf_path)):
+    if (
+        document_exists_by_hash(conn, content_hash)
+        or document_exists(conn, stored_source_path)
+        or document_exists(conn, str(pdf_path))
+    ):
         return {"status": "duplicate", "path": str(pdf_path)}
 
     analysis = _build_analysis(pdf_path, cfg=cfg)
@@ -131,6 +154,8 @@ def process_pdf(
         conn,
         filename=pdf_path.name,
         filepath=stored_source_path,
+        content_hash=content_hash,
+        file_size=file_size,
         extracted_text=text,
         detected_date=doc_date.isoformat() if doc_date else None,
         category=category,

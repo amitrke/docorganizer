@@ -168,6 +168,8 @@ documents/
 
 If two files land in the same folder with the same name, a counter is appended automatically (`invoice_001_2.pdf`, etc.).
 
+Duplicate detection uses SHA-256 content hashing plus existing path checks, so the same PDF content is skipped even when copied with a different filename.
+
 ---
 
 ## Configuration (`config.yaml`)

@@ -8,6 +8,8 @@ CREATE TABLE IF NOT EXISTS documents (
     id                   INTEGER PRIMARY KEY AUTOINCREMENT,
     filename             TEXT NOT NULL,
     filepath             TEXT NOT NULL UNIQUE,
+    content_hash         TEXT,
+    file_size            INTEGER,
     extracted_text       TEXT,
     detected_date        TEXT,
     category             TEXT,
@@ -47,6 +49,8 @@ CREATE TRIGGER IF NOT EXISTS documents_ad AFTER DELETE ON documents BEGIN
     INSERT INTO documents_fts(documents_fts, rowid, filename, extracted_text)
     VALUES ('delete', old.id, old.filename, old.extracted_text);
 END;
+
+CREATE INDEX IF NOT EXISTS idx_documents_content_hash ON documents(content_hash);
 """
 
 
@@ -90,6 +94,10 @@ def parse_extracted_fields(raw: str | None) -> dict[str, str]:
 def _migrate(conn) -> None:
     """Apply incremental schema changes to existing databases."""
     existing = {row[1] for row in conn.execute("PRAGMA table_info(documents)")}
+    if "content_hash" not in existing:
+        conn.execute("ALTER TABLE documents ADD COLUMN content_hash TEXT")
+    if "file_size" not in existing:
+        conn.execute("ALTER TABLE documents ADD COLUMN file_size INTEGER")
     if "ai_rationale" not in existing:
         conn.execute("ALTER TABLE documents ADD COLUMN ai_rationale TEXT")
     if "ai_summary" not in existing:
@@ -98,6 +106,7 @@ def _migrate(conn) -> None:
         conn.execute("ALTER TABLE documents ADD COLUMN extracted_fields TEXT")
     if "ai_suggested_category" not in existing:
         conn.execute("ALTER TABLE documents ADD COLUMN ai_suggested_category TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_content_hash ON documents(content_hash)")
     conn.commit()
 
 
@@ -110,6 +119,8 @@ def init_db(db_path: str | Path) -> None:
 
 
 def insert_document(conn: sqlite3.Connection, *, filename: str, filepath: str,
+                    content_hash: str | None = None,
+                    file_size: int | None = None,
                     extracted_text: str, detected_date: str | None,
                     category: str | None, classification_source: str = "rules",
                     ai_suggested_category: str | None = None,
@@ -120,12 +131,12 @@ def insert_document(conn: sqlite3.Connection, *, filename: str, filepath: str,
     cur = conn.execute(
         """
         INSERT INTO documents
-            (filename, filepath, extracted_text, detected_date,
+            (filename, filepath, content_hash, file_size, extracted_text, detected_date,
                category, ai_suggested_category, classification_source, ai_rationale, ai_summary,
                extracted_fields, filing_status, skipped)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (filename, filepath, extracted_text, detected_date,
+        (filename, filepath, content_hash, file_size, extracted_text, detected_date,
             category, ai_suggested_category, classification_source, ai_rationale, ai_summary,
             serialize_extracted_fields(extracted_fields), filing_status, skipped),
     )
@@ -136,6 +147,13 @@ def insert_document(conn: sqlite3.Connection, *, filename: str, filepath: str,
 def document_exists(conn: sqlite3.Connection, filepath: str) -> bool:
     row = conn.execute(
         "SELECT 1 FROM documents WHERE filepath = ?", (filepath,)
+    ).fetchone()
+    return row is not None
+
+
+def document_exists_by_hash(conn: sqlite3.Connection, content_hash: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM documents WHERE content_hash = ? LIMIT 1", (content_hash,)
     ).fetchone()
     return row is not None
 
