@@ -108,7 +108,41 @@ docorg review ask-ai 12
 docorg review ask-ai 12 --apply
 docorg review refile 12
 docorg review skip 12
+docorg review delete 12
+docorg review delete --apply 12
+docorg review clear-legacy
+docorg review clear-legacy --apply
 ```
+
+`docorg review ask-ai <id>` previews AI suggestions (date, category, rationale, summary, extracted fields) without saving. Add `--apply` to persist the results to the database.
+
+### Interactive TUI
+
+A full-screen terminal UI for browsing and editing all indexed documents.
+
+```sh
+docorg review tui
+docorg review tui --status all    # include already-filed documents
+```
+
+Key bindings:
+
+| Key | Action |
+|-----|--------|
+| `↑` / `↓` | Navigate document list |
+| `a` | Ask AI — shows suggestion dialog; press Apply to save |
+| `d` | Edit detected date |
+| `c` | Edit category |
+| `r` | Re-file document to its current date/category folder |
+| `s` | Toggle skip flag |
+| `Ctrl+R` | Refresh list |
+| `q` | Quit |
+
+The `[a]` AI dialog is the fastest way to enrich existing documents with rationale, a detailed summary, and extracted key-value fields (e.g. `total_amount`, `location`). It calls Ollama on demand and lets you review the suggestion before committing.
+
+`docorg review delete` previews matching rows by ID and only removes them from the database when `--apply` is passed. It does not delete the actual PDF files from disk.
+
+`docorg review clear-legacy` previews rows whose `filepath` still uses host-specific legacy values instead of the host-neutral `documents/...` or `inbox/...` format. Pass `--apply` to remove those legacy rows from the database.
 
 ---
 

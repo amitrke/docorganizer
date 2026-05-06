@@ -449,7 +449,6 @@ class ReviewApp(App):
                     doc_id,
                     detected_date=value or None,
                     classification_source="manual",
-                    clear_ai_metadata=True,
                     skipped=0,
                 )
             self._selected_id = doc_id
@@ -481,7 +480,6 @@ class ReviewApp(App):
                     doc_id,
                     category=value or None,
                     classification_source="manual",
-                    clear_ai_metadata=True,
                     skipped=0,
                 )
             self._selected_id = doc_id

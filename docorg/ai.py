@@ -42,7 +42,10 @@ def _normalize_fields(value: object) -> dict[str, str]:
 
 
 def suggest_date_category(*, text: str, filename: str, categories: list[str], ai_cfg: dict) -> dict | None:
+    """Returns suggestion dict on success, or None. Sets suggest_date_category.last_error on failure."""
+    suggest_date_category.last_error = ""
     if not ai_cfg.get("enabled", False):
+        suggest_date_category.last_error = "ai.enabled is false in config"
         return None
 
     model = ai_cfg.get("model", "mistral:7b-instruct")
@@ -76,15 +79,18 @@ def suggest_date_category(*, text: str, filename: str, categories: list[str], ai
         method="POST",
     )
 
+    timeout = ai_cfg.get("timeout", 120)
     try:
-        with request.urlopen(req, timeout=30) as resp:
+        with request.urlopen(req, timeout=timeout) as resp:
             body = json.loads(resp.read().decode("utf-8"))
-    except Exception:
+    except Exception as exc:
+        suggest_date_category.last_error = f"Ollama request failed: {exc}"
         return None
 
     raw = body.get("response", "")
     parsed = _extract_json_block(raw)
     if not parsed:
+        suggest_date_category.last_error = f"Could not parse JSON from model response: {raw[:200]!r}"
         return None
 
     date_value = parsed.get("date")

@@ -127,7 +127,8 @@ def _interactive_adjustments(pdf: Path, cfg: dict, conn) -> tuple[
                 ai_cfg=cfg.get("ai", {}),
             )
             if not ai_suggestion:
-                click.echo("AI suggestion unavailable (check ai.enabled and Ollama).")
+                reason = getattr(suggest_date_category, "last_error", "")
+                click.echo(f"AI suggestion unavailable: {reason}" if reason else "AI suggestion unavailable (check ai.enabled and Ollama).")
                 continue
             click.echo(
                 f"AI suggestion: date={ai_suggestion['date'] or '(none)'}  "
@@ -374,6 +375,51 @@ def review_clear_legacy(config: str, apply: bool, limit: int) -> None:
         click.echo(f"Deleted {len(legacy_rows)} legacy row(s).")
 
 
+@review.command("delete")
+@click.option("--config", default="config.yaml", show_default=True)
+@click.option("--apply", is_flag=True,
+              help="Delete the selected DB rows. Without this flag, runs as preview.")
+@click.argument("doc_ids", type=int, nargs=-1)
+def review_delete(config: str, apply: bool, doc_ids: tuple[int, ...]) -> None:
+    """Preview or delete one or more document rows by ID."""
+    if not doc_ids:
+        raise click.UsageError("Provide at least one document ID to delete.")
+
+    cfg = _resolve_config(config)
+    requested_ids = sorted(set(doc_ids))
+
+    with get_connection(cfg["paths"]["database"]) as conn:
+        placeholders = ", ".join("?" for _ in requested_ids)
+        rows = conn.execute(
+            f"SELECT id, filename, filepath FROM documents WHERE id IN ({placeholders}) ORDER BY id",
+            requested_ids,
+        ).fetchall()
+
+        found_ids = {row["id"] for row in rows}
+        missing_ids = [doc_id for doc_id in requested_ids if doc_id not in found_ids]
+
+        if not rows:
+            click.echo("No matching document rows found.")
+            return
+
+        click.echo(f"Matched {len(rows)} row(s):")
+        for row in rows:
+            click.echo(f"  #{row['id']:<4} {row['filename']:<35} {row['filepath']}")
+        if missing_ids:
+            click.echo(f"Missing IDs: {', '.join(str(doc_id) for doc_id in missing_ids)}")
+
+        if not apply:
+            click.echo("Re-run with --apply to delete these rows from the DB.")
+            return
+
+        conn.executemany(
+            "DELETE FROM documents WHERE id = ?",
+            [(row["id"],) for row in rows],
+        )
+        conn.commit()
+        click.echo(f"Deleted {len(rows)} row(s).")
+
+
 @review.command("set-date")
 @click.option("--config", default="config.yaml", show_default=True)
 @click.argument("doc_id", type=int)
@@ -387,7 +433,6 @@ def review_set_date(config: str, doc_id: int, new_date: str) -> None:
             doc_id,
             detected_date=new_date,
             classification_source="manual",
-            clear_ai_metadata=True,
             skipped=0,
         )
     click.echo(f"Updated doc #{doc_id} date -> {new_date}")
@@ -406,7 +451,6 @@ def review_set_category(config: str, doc_id: int, new_category: str) -> None:
             doc_id,
             category=category_value,
             classification_source="manual",
-            clear_ai_metadata=True,
             skipped=0,
         )
     click.echo(f"Updated doc #{doc_id} category -> {category_value or '(none)'}")
@@ -442,7 +486,8 @@ def review_ask_ai(config: str, apply: bool, doc_id: int) -> None:
         )
 
         if not suggestion:
-            click.echo("AI suggestion unavailable (check ai.enabled and Ollama).")
+            reason = getattr(suggest_date_category, "last_error", "")
+            click.echo(f"AI suggestion unavailable: {reason}" if reason else "AI suggestion unavailable (check ai.enabled and Ollama).")
             return
 
         click.echo(
