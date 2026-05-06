@@ -216,6 +216,14 @@ def get_document_by_id(conn: sqlite3.Connection, doc_id: int) -> sqlite3.Row | N
     ).fetchone()
 
 
+def list_categories(conn: sqlite3.Connection) -> list[str]:
+    """Return all distinct non-null category values stored in the database."""
+    rows = conn.execute(
+        "SELECT DISTINCT category FROM documents WHERE category IS NOT NULL ORDER BY category"
+    ).fetchall()
+    return [row[0] for row in rows]
+
+
 def update_document_fields(conn: sqlite3.Connection, doc_id: int, *,
                            detected_date: str | None = None,
                            category: str | None = None,
