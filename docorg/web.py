@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from html import escape
+import urllib.parse
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
@@ -71,8 +72,58 @@ def _resolve_db_filepath(filepath: str, cfg: dict, base_from: str | None,
     return _resolve_doc_path(translated)
 
 
+def _pagination_controls(page: int, total: int, page_size: int,
+                         q: str, status: str, category: str | None) -> str:
+    """Return an HTML pagination bar, or empty string when everything fits on one page."""
+    if total <= page_size:
+        return ""
+    total_pages = (total + page_size - 1) // page_size
+    start = (page - 1) * page_size + 1
+    end = min(page * page_size, total)
+
+    def page_url(p: int) -> str:
+        params = []
+        if q:
+            params.append("q=" + urllib.parse.quote_plus(q))
+        if status and status != "all":
+            params.append("status=" + urllib.parse.quote_plus(status))
+        if category:
+            params.append("category=" + urllib.parse.quote_plus(category))
+        params.append(f"page={p}")
+        return "/?" + "&".join(params)
+
+    visible: set[int] = {1, total_pages}
+    for p in range(max(1, page - 2), min(total_pages, page + 2) + 1):
+        visible.add(p)
+
+    links: list[str] = []
+    if page > 1:
+        links.append(f'<a class="page-link" href="{page_url(page - 1)}">&#8592; Prev</a>')
+    else:
+        links.append('<span class="page-link disabled">&#8592; Prev</span>')
+
+    last = 0
+    for p in sorted(visible):
+        if p - last > 1:
+            links.append('<span class="page-ellipsis">&#8230;</span>')
+        if p == page:
+            links.append(f'<span class="page-link current">{p}</span>')
+        else:
+            links.append(f'<a class="page-link" href="{page_url(p)}">{p}</a>')
+        last = p
+
+    if page < total_pages:
+        links.append(f'<a class="page-link" href="{page_url(page + 1)}">Next &#8594;</a>')
+    else:
+        links.append('<span class="page-link disabled">Next &#8594;</span>')
+
+    count_text = f'<span class="result-count">Showing {start}&#8211;{end} of {total}</span>'
+    return f'<div class="pager">{count_text}{" ".join(links)}</div>'
+
+
 def _render_home(cfg: dict, query: str, status: str, category: str | None, rows: list,
-                 db_categories: list[str] | None = None) -> str:
+                 db_categories: list[str] | None = None,
+                 page: int = 1, page_size: int = 25, total: int = 0) -> str:
     status_options = ["all", "pending", "filed"]
     cfg_cats = cfg.get("categories", [])
     # Merge config-defined categories with any category values present in the DB
@@ -101,8 +152,8 @@ def _render_home(cfg: dict, query: str, status: str, category: str | None, rows:
                     <td>{filename}</td>
                     <td>{detected_date}</td>
                     <td>{category}</td>
-                    <td>{source}</td>
-                    <td>{status}</td>
+                    <td><span class="badge src-{source_key}">{source}</span></td>
+                    <td><span class="badge st-{status_key}">{status}</span></td>
                     <td class="actions">
                         <a class="btn subtle" href="/documents/{id}">Details</a>
                         <a class="btn" href="/documents/{id}/content" target="_blank" rel="noopener noreferrer">View</a>
@@ -114,10 +165,13 @@ def _render_home(cfg: dict, query: str, status: str, category: str | None, rows:
                     detected_date=escape(_fmt(row["detected_date"])),
                     category=escape(_fmt(row["category"])),
                     source=escape(_fmt(row["classification_source"])),
+                    source_key=(_fmt(row["classification_source"], "") or "other").lower(),
                     status=escape(_fmt(row["filing_status"])),
+                    status_key=(_fmt(row["filing_status"], "") or "other").lower(),
                 )
             )
 
+    pagination = _pagination_controls(page, total, page_size, query, status, category)
     return f"""
 <!doctype html>
 <html lang="en">
@@ -235,6 +289,56 @@ def _render_home(cfg: dict, query: str, status: str, category: str | None, rows:
             .filters form {{ grid-template-columns: 1fr; }}
             button {{ width: 100%; }}
         }}
+        .badge {{
+            display: inline-block;
+            padding: 2px 9px;
+            border-radius: 999px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            letter-spacing: 0.02em;
+        }}
+        .src-ai {{ background: #e8e0f5; color: #5933a8; }}
+        .src-rules {{ background: var(--accent-soft); color: #1a5c5a; }}
+        .src-manual {{ background: #fdebd0; color: #8a4010; }}
+        .src-other {{ background: #eee; color: #555; }}
+        .st-filed {{ background: #d4edda; color: #1a6630; }}
+        .st-pending {{ background: #fff3cd; color: #7a5200; }}
+        .st-skipped {{ background: #e9ecef; color: #555; }}
+        .st-other {{ background: #eee; color: #555; }}
+        thead tr th {{
+            position: sticky;
+            top: 0;
+            background: #fff;
+            z-index: 2;
+            box-shadow: 0 1px 0 var(--line);
+        }}
+        .pager {{
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            flex-wrap: wrap;
+            padding: 16px 24px;
+            border-top: 1px solid var(--line);
+        }}
+        .result-count {{
+            margin-right: auto;
+            font-size: 0.88rem;
+            color: #6f6154;
+        }}
+        .page-link {{
+            display: inline-block;
+            padding: 5px 10px;
+            border-radius: var(--radius);
+            border: 1px solid var(--line);
+            font-size: 0.88rem;
+            text-decoration: none;
+            color: var(--ink);
+            background: #fff;
+        }}
+        .page-link:hover {{ background: var(--accent-soft); border-color: var(--accent); }}
+        .page-link.current {{ background: var(--accent); color: #fff; border-color: var(--accent); }}
+        .page-link.disabled {{ opacity: 0.4; pointer-events: none; }}
+        .page-ellipsis {{ padding: 5px 4px; color: #999; font-size: 0.88rem; }}
     </style>
 </head>
 <body>
@@ -268,6 +372,7 @@ def _render_home(cfg: dict, query: str, status: str, category: str | None, rows:
                     {''.join(row_html)}
                 </tbody>
             </table>
+            {pagination}
         </section>
     </div>
 </body>
@@ -445,11 +550,14 @@ def create_app(cfg: dict) -> FastAPI:
     path_base_from: str | None = web_cfg.get("path_base_from")
     path_base_to: str | None = web_cfg.get("path_base_to")
 
+    _PAGE_SIZE = 25
+
     @app.get("/", response_class=HTMLResponse)
     def home(
         q: str = Query(default="", max_length=200),
         status: str = Query(default="all", pattern="^(all|pending|filed)$"),
         category: str | None = Query(default=None),
+        page: int = Query(default=1, ge=1),
     ) -> HTMLResponse:
         with get_connection(db_path) as conn:
             db_categories = list_categories(conn)
@@ -461,7 +569,12 @@ def create_app(cfg: dict) -> FastAPI:
                     rows = [row for row in rows if row["category"] == category]
             else:
                 rows = list_documents(conn, status=status, category=category)
-        return HTMLResponse(_render_home(cfg, q, status, category, rows, db_categories=db_categories))
+        total = len(rows)
+        offset = (page - 1) * _PAGE_SIZE
+        page_rows = rows[offset: offset + _PAGE_SIZE]
+        return HTMLResponse(_render_home(cfg, q, status, category, page_rows,
+                                         db_categories=db_categories,
+                                         page=page, page_size=_PAGE_SIZE, total=total))
 
     @app.get("/documents/{doc_id}", response_class=HTMLResponse)
     def document_detail(doc_id: int) -> HTMLResponse:

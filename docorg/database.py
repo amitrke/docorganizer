@@ -49,8 +49,6 @@ CREATE TRIGGER IF NOT EXISTS documents_ad AFTER DELETE ON documents BEGIN
     INSERT INTO documents_fts(documents_fts, rowid, filename, extracted_text)
     VALUES ('delete', old.id, old.filename, old.extracted_text);
 END;
-
-CREATE INDEX IF NOT EXISTS idx_documents_content_hash ON documents(content_hash);
 """
 
 

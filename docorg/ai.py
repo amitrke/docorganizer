@@ -3,6 +3,51 @@ import re
 from urllib import request
 
 
+def _repair_truncated_json(text: str) -> str | None:
+    """Best-effort repair for a JSON object cut off mid-generation."""
+    text = text.strip()
+    if not text.startswith("{"):
+        return None
+
+    repaired: list[str] = []
+    stack: list[str] = []
+    in_string = False
+    escaped = False
+
+    for char in text:
+        repaired.append(char)
+
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+        elif char in "{[":
+            stack.append(char)
+        elif char in "}]":
+            if stack:
+                opener = stack[-1]
+                if (opener == "{" and char == "}") or (opener == "[" and char == "]"):
+                    stack.pop()
+            if not stack:
+                break
+
+    if in_string:
+        repaired.append('"')
+
+    while stack:
+        opener = stack.pop()
+        repaired.append("}" if opener == "{" else "]")
+
+    return "".join(repaired)
+
+
 def _extract_json_block(text: str) -> dict | None:
     text = text.strip()
     try:
@@ -10,13 +55,21 @@ def _extract_json_block(text: str) -> dict | None:
     except json.JSONDecodeError:
         pass
 
-    m = re.search(r"\{[\s\S]*\}", text)
-    if not m:
+    start = text.find("{")
+    if start == -1:
         return None
+
+    candidate = text[start:]
     try:
-        return json.loads(m.group(0))
+        return json.loads(candidate)
     except json.JSONDecodeError:
-        return None
+        repaired = _repair_truncated_json(candidate)
+        if not repaired:
+            return None
+        try:
+            return json.loads(repaired)
+        except json.JSONDecodeError:
+            return None
 
 
 def _normalize_fields(value: object) -> dict[str, str]:

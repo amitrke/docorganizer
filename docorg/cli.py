@@ -517,6 +517,26 @@ def review_ask_ai(config: str, apply: bool, doc_id: int) -> None:
                 skipped=0,
             )
             click.echo("Applied AI suggestion.")
+            
+            # Auto-refile if date or category changed
+            if suggestion["date"] or suggestion.get("category"):
+                src = resolve_stored_path(row["filepath"], cfg)
+                if src.exists() and suggestion["date"]:
+                    doc_date = date.fromisoformat(suggestion["date"])
+                    dest = file_document(
+                        src,
+                        documents_root=cfg["paths"]["documents"],
+                        doc_date=doc_date,
+                        category=suggestion.get("category") or row["category"],
+                    )
+                    update_document_fields(
+                        conn,
+                        doc_id,
+                        filepath=to_stored_path(dest, cfg),
+                    )
+                    click.echo(f"Auto-refiled to {dest}")
+                elif not src.exists():
+                    click.echo(f"Warning: source file missing at {src} — document not moved")
 
 
 @review.command("ask-ai-bulk")
@@ -633,6 +653,24 @@ def review_ask_ai_bulk(
                     extracted_fields=suggestion.get("fields") or None,
                     skipped=0,
                 )
+                
+                # Auto-refile if date changed
+                if suggestion.get("date"):
+                    src = resolve_stored_path(row["filepath"], cfg)
+                    if src.exists():
+                        doc_date = date.fromisoformat(suggestion["date"])
+                        dest = file_document(
+                            src,
+                            documents_root=cfg["paths"]["documents"],
+                            doc_date=doc_date,
+                            category=suggestion.get("category") or row["category"],
+                        )
+                        update_document_fields(
+                            conn,
+                            row["id"],
+                            filepath=to_stored_path(dest, cfg),
+                        )
+                
                 applied_count += 1
 
         click.echo(
@@ -690,3 +728,128 @@ def review_refile(config: str, doc_id: int) -> None:
         )
 
     click.echo(f"Re-filed #{doc_id} -> {dest}")
+
+
+@main.group()
+def validate() -> None:
+    """Validate document metadata and file organization."""
+
+
+@validate.command("paths")
+@click.option("--config", default="config.yaml", show_default=True)
+@click.option("--status", type=click.Choice(["all", "pending", "filed"], case_sensitive=False),
+              default="all", show_default=True)
+@click.option("--show-all", is_flag=True, help="Show all documents, including matching ones.")
+@click.option("--apply", is_flag=True, help="Automatically refile mismatched documents to correct folders.")
+def validate_paths(config: str, status: str, show_all: bool, apply: bool) -> None:
+    """Check if file paths match detected_date and category metadata.
+    
+    Documents are expected in: documents/YYYY/MM/category/filename
+    This command verifies that the stored filepath matches the detected_date and category.
+    With --apply, automatically refiles mismatched documents.
+    """
+    cfg = _resolve_config(config)
+    
+    with get_connection(cfg["paths"]["database"]) as conn:
+        rows = list_documents(conn, status=status)
+    
+    if not rows:
+        click.echo("No documents to validate.")
+        return
+    
+    mismatches: list = []
+    matches = 0
+    
+    skipped_invalid = 0
+    
+    for row in rows:
+        if not row["detected_date"] or not row["category"]:
+            # Skip documents without date or category
+            continue
+        
+        # Try to parse the detected date
+        try:
+            doc_date = date.fromisoformat(row["detected_date"])
+        except ValueError:
+            if show_all:
+                click.echo(f"⊘ #{row['id']:<4} {row['filename']:<40} invalid date: {row['detected_date']}")
+            skipped_invalid += 1
+            continue
+        
+        year = doc_date.strftime("%Y")
+        month = doc_date.strftime("%m")
+        category = row["category"]
+        expected_prefix = f"documents/{year}/{month}/{category}/"
+        
+        # Check if stored filepath matches expected structure
+        stored_path = row["filepath"].replace("\\", "/")
+        if stored_path.startswith(expected_prefix):
+            matches += 1
+            if show_all:
+                click.echo(f"✓ #{row['id']:<4} {row['filename']:<40} ✓ matches")
+        else:
+            mismatches.append({
+                'id': row['id'],
+                'filename': row['filename'],
+                'stored': stored_path,
+                'expected_prefix': expected_prefix,
+                'detected_date': row['detected_date'],
+                'category': category,
+                'row': row,
+            })
+            click.echo(
+                f"✗ #{row['id']:<4} {row['filename']:<40}\n"
+                f"    stored:    {stored_path}\n"
+                f"    expected:  {expected_prefix}*"
+            )
+    
+    click.echo(f"\n--- Summary ---")
+    click.echo(f"Matches:    {matches}")
+    click.echo(f"Mismatches: {len(mismatches)}")
+    if skipped_invalid:
+        click.echo(f"Skipped (invalid date format): {skipped_invalid}")
+    
+    if apply and mismatches:
+        click.echo(f"\nApplying fixes...")
+        fixed = 0
+        failed = 0
+        
+        with get_connection(cfg["paths"]["database"]) as conn:
+            for mismatch in mismatches:
+                row = mismatch['row']
+                try:
+                    src = resolve_stored_path(row["filepath"], cfg)
+                    if not src.exists():
+                        click.echo(f"  ✗ #{row['id']} — source file missing at {src}")
+                        failed += 1
+                        continue
+                    
+                    # Refile to correct location
+                    doc_date = date.fromisoformat(row["detected_date"])
+                    dest = file_document(
+                        src,
+                        documents_root=cfg["paths"]["documents"],
+                        doc_date=doc_date,
+                        category=row["category"],
+                    )
+                    
+                    # Update DB with new filepath
+                    update_document_fields(
+                        conn,
+                        row["id"],
+                        filepath=to_stored_path(dest, cfg),
+                    )
+                    
+                    click.echo(f"  ✓ #{row['id']} — refiled to {dest}")
+                    fixed += 1
+                except ValueError as ve:
+                    click.echo(f"  ✗ #{row['id']} — invalid date format: {row['detected_date']}")
+                    failed += 1
+                except Exception as e:
+                    click.echo(f"  ✗ #{row['id']} — error: {e}")
+                    failed += 1
+        
+        click.echo(f"\nFixed: {fixed}, Failed: {failed}")
+    elif mismatches:
+        click.echo(f"\nTo fix mismatches, run:")
+        click.echo(f"  docorg validate paths --status {status} --apply")
