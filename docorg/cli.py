@@ -600,7 +600,7 @@ def review_ask_ai_bulk(
         limit_sql = "" if limit <= 0 else f"LIMIT {limit}"
         rows = conn.execute(
             f"""
-            SELECT id, filename, extracted_text, detected_date, category, classification_source
+            SELECT id, filename, filepath, extracted_text, detected_date, category, classification_source
             FROM documents
             {where_sql}
             ORDER BY id
@@ -653,23 +653,26 @@ def review_ask_ai_bulk(
                     extracted_fields=suggestion.get("fields") or None,
                     skipped=0,
                 )
-                
-                # Auto-refile if date changed
+
+                # Auto-refile if AI returned a valid date.
                 if suggestion.get("date"):
-                    src = resolve_stored_path(row["filepath"], cfg)
-                    if src.exists():
-                        doc_date = date.fromisoformat(suggestion["date"])
-                        dest = file_document(
-                            src,
-                            documents_root=cfg["paths"]["documents"],
-                            doc_date=doc_date,
-                            category=suggestion.get("category") or row["category"],
-                        )
-                        update_document_fields(
-                            conn,
-                            row["id"],
-                            filepath=to_stored_path(dest, cfg),
-                        )
+                    try:
+                        src = resolve_stored_path(row["filepath"], cfg)
+                        if src.exists():
+                            doc_date = date.fromisoformat(suggestion["date"])
+                            dest = file_document(
+                                src,
+                                documents_root=cfg["paths"]["documents"],
+                                doc_date=doc_date,
+                                category=suggestion.get("category") or row["category"],
+                            )
+                            update_document_fields(
+                                conn,
+                                row["id"],
+                                filepath=to_stored_path(dest, cfg),
+                            )
+                    except ValueError:
+                        click.echo(f"#{row['id']} skipped refile: invalid AI date {suggestion['date']!r}")
                 
                 applied_count += 1
 

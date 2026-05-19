@@ -2,6 +2,8 @@ ai:
   enabled: true
   model: mistral:7b-instruct
   ollama_url: http://localhost:11434
+  timeout: 180
+  max_tokens: 1200
 categories:
 - health
 - tax
@@ -9,13 +11,8 @@ categories:
 - insurance
 - utilities
 - finance
-paths:
-  database: docorganizer.db
-  documents: documents
-  inbox: scans
-processing:
-  mode: auto
-
+- housing
+- immigration
 date_detection:
   keywords:
   - invoice date
@@ -26,56 +23,194 @@ date_detection:
   - appointment date
   - issued on
   - date:
-
+paths:
+  database: Y:\docsorg\config\docorganizer.db
+  documents: Y:\docsorg\documents
+  inbox: Y:\docsorg\inbox
+processing:
+  mode: interactive
+classification:
+  min_score: 1.0
+  min_score_gap: 1.0
+  negative_weight: 1.25
 rules:
+# Priority 5 - high-confidence discriminators
+- category: immigration
+  any_keywords:
+  - uscis
+  - ircc
+  - biometrics
+  - nonimmigrant
+  - permanent resident
+  - h1b
+  - passport
+  - visa stamp
+  exclude_keywords:
+  - tenancy agreement
+  - lease agreement
+  - pods
+  priority: 5
+
+- category: tax
+  any_keywords:
+  - form 1040
+  - tax return
+  - turbotax
+  - intuit
+  - w-2
+  - 1099
+  - irs
+  - ptin
+  negative_keywords:
+  - portfolio
+  - lease agreement
+  priority: 5
+
+- category: education
+  any_keywords:
+  - public schools
+  - school district
+  - curriculum
+  - instructional
+  - kindergarten
+  - iep
+  - fape
+  - offer of fape
+  - classroom
+  - teacher
+  filename_keywords:
+  - school
+  - schools
+  - iep
+  exclude_keywords:
+  - tax return
+  - form 1040
+  priority: 5
+
+# Priority 10 - medium confidence rules with collision controls
+- category: utilities
+  any_keywords:
+  - mybill
+  - keyline
+  - novec
+  - wifi
+  - internet
+  - electricity
+  - kwh
+  - thm
+  - distribution charge
+  - usage
+  - sewer
+  - puc
+  - taxesandsurcharges
+  - gas bill
+  filename_keywords:
+  - my-bill
+  - mybill
+  exclude_keywords:
+  - lease agreement
+  - uscis
+  - offer of fape
+  - auto collision
+  priority: 10
+
+- category: insurance
+  any_keywords:
+  - insuring
+  - premium
+  - policy number
+  - liability insurance
+  - evidence of liability insurance
+  - liability
+  - deductible
+  - reinsurance
+  - lienholder
+  - roadside
+  - windstorm
+  - renters insurance
+  - auto collision
+  - final bill
+  - registration card
+  filename_keywords:
+  - policy
+  - travelers
+  - insurance
+  exclude_keywords:
+  - lease agreement
+  - tenancy agreement
+  - landlord
+  - tenant
+  - premises
+  negative_keywords:
+  - uscis
+  priority: 10
+
+- category: housing
+  any_keywords:
+  - lease agreement
+  - tenancy agreement
+  - tenancy renewal
+  - landlord
+  - tenant
+  - premises
+  - apartment
+  - pods
+  - customs form
+  - addenda
+  - reletting
+  - rekeying
+  - evicted
+  - rental
+  filename_keywords:
+  - lease
+  - tenancy
+  exclude_keywords:
+  - uscis
+  - policy number
+  priority: 10
+
+# Priority 15 - often mixed with tax/insurance, keep conservative
 - category: health
-  keywords:
-  - doctor
-  - clinic
-  - hospital
+  any_keywords:
+  - aetna
+  - mychart
+  - diagnosis
+  - copay
+  - coinsurance
+  - member authorization
   - prescription
   - pharmacy
-  - medical
-  - pathology
-  priority: 10
-- category: tax
-  keywords:
-  - income tax
-  - itr
-  - tax return
-  - form 16
-  - tds
-  - gst
-  priority: 10
-- category: education
-  keywords:
-  - school
-  - college
-  - university
-  - tuition
-  - fee receipt
-  - marksheet
-  - admit card
-  priority: 10
-- category: insurance
-  keywords:
-  - insurance
-  - policy
-  - premium
-  - claim
-  priority: 10
-- category: utilities
-  keywords:
-  - electricity
-  - water bill
-  - gas bill
-  - broadband
-  - internet bill
-  priority: 10
+  - medical record
+  - patient
+  filename_keywords:
+  - medications
+  - prescription
+  negative_keywords:
+  - lease agreement
+  - turbotax
+  priority: 15
+
 - category: finance
-  keywords:
+  any_keywords:
+  - portfolio
+  - fdic
+  - dividend
+  - earnings statement
+  - paystatement
+  - wages
+  - withheld
+  - medicare
+  - account summary
+  - payoff
+  - equity
+  - investment
+  - routing number
   - bank statement
-  - account statement
-  - credit card
-  - loan
-  priority: 10
+  - adp
+  filename_keywords:
+  - account
+  - statement
+  negative_keywords:
+  - form 1040
+  - uscis
+  priority: 15

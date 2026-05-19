@@ -183,6 +183,12 @@ paths:
 processing:
   mode: auto            # auto | interactive (interactive = Phase 5)
 
+classification:
+  # Category assignment uses weighted scoring instead of first keyword hit.
+  min_score: 1.0        # minimum winning score required
+  min_score_gap: 0.75   # winner must beat runner-up by this margin
+  negative_weight: 1.25 # penalty multiplier for negative keyword hits
+
 date_detection:
   # Keywords used to find label-prefixed dates before generic date parsing.
   # Example matches: "Statement Date: 29/04/2026", "Date of Service 2026-04-29".
@@ -205,13 +211,19 @@ categories:
   - finance
 
 # Mapping rules: keywords matched against filename + extracted text.
-# Lower priority number = higher precedence when multiple rules match.
+# Lower priority number provides a small tie-break bonus.
 rules:
   - keywords: [doctor, clinic, hospital, prescription]
     category: health
     priority: 10
   - keywords: [income tax, itr, form 16, tds]
     category: tax
+    priority: 10
+  - category: education
+    any_keywords: [public schools, school district]
+    exclude_keywords: [tax return]
+    negative_keywords: [form 1040]
+    filename_keywords: [school]
     priority: 10
 
 ai:
@@ -222,6 +234,16 @@ ai:
   timeout: 180                 # seconds for Ollama response
   max_tokens: 768              # response budget; increase if JSON gets truncated
 ```
+
+Supported rule fields (all optional except `category`):
+
+- `keywords`: positive terms (legacy behavior, still supported)
+- `any_keywords`: at least one must match
+- `all_keywords`: every term must match
+- `filename_keywords`: positive terms checked against filename only (higher weight)
+- `exclude_keywords`: hard block list; rule is skipped if any match
+- `negative_keywords`: soft penalties to reduce false positives
+- `priority`: lower numbers provide a mild bonus when scores are close
 
 To use AI-assisted classification, set `ai.enabled: true` and ensure Ollama is running with your chosen model pulled (`ollama pull mistral:7b-instruct`). AI suggestions can also persist a detailed summary plus extracted fields such as `total_amount`, `location`, or other explicit document facts when the model can find them reliably.
 
