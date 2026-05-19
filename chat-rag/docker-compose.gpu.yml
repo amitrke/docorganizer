@@ -1,0 +1,34 @@
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: docorg-ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    gpus: all
+
+  chat-rag:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: docorg-chat-rag
+    restart: unless-stopped
+    depends_on:
+      - ollama
+    env_file:
+      - .env
+    environment:
+      OLLAMA_URL: http://ollama:11434
+      DOCORG_DB_PATH: /data/docorganizer.db
+      DOCORG_DOCS_PATH: /data/documents
+    ports:
+      - "8090:8090"
+    volumes:
+      # Keep these mounted read-only to avoid touching your existing data flow.
+      - /volume1/docorganizer/docorganizer.db:/data/docorganizer.db:ro
+      - /volume1/docorganizer/documents:/data/documents:ro
+
+volumes:
+  ollama-data:
