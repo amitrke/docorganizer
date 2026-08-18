@@ -1,20 +1,65 @@
 from __future__ import annotations
 
-from html import escape
+import json
+import tempfile
+from contextlib import asynccontextmanager
+from datetime import date
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi import APIRouter, FastAPI, File, HTTPException, Query, UploadFile
+from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
-from .database import get_connection, get_document_by_id, list_categories, list_documents, parse_extracted_fields, search_documents
-from .pathing import resolve_stored_path
+from .ai import (
+    DEFAULT_AI_SETTINGS,
+    PROVIDER_DEFAULTS,
+    ensure_ai_profiles_seeded,
+    resolve_ai_config,
+    suggest_date_category,
+    test_provider_connection,
+)
+from .config import add_configured_category, get_configured_categories, remove_configured_category
+from .database import (
+    SORT_COLUMNS,
+    delete_ai_profile,
+    get_ai_profile,
+    get_connection,
+    get_document_by_id,
+    insert_ai_profile,
+    list_ai_profiles,
+    list_categories,
+    list_documents,
+    parse_extracted_fields,
+    search_documents,
+    set_active_ai_profile,
+    update_ai_profile,
+    update_document_fields,
+)
+from .filer import file_document
+from .pathing import resolve_stored_path, to_stored_path
+from .processor import process_pdf
+from .watcher import start_observer
 
 
-def _fmt(value: object | None, default: str = "(none)") -> str:
-    if value is None:
-        return default
-    text = str(value).strip()
-    return text if text else default
+def _valid_iso_date(value: str | None) -> str | None:
+    if not value:
+        return None
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        return None
+    return value
+
+
+def _sort_rows(rows: list, sort_by: str, sort_dir: str) -> list:
+    """Sort FTS results the same way list_documents sorts via SQL: nulls always last."""
+    column = sort_by if sort_by in SORT_COLUMNS else "detected_date"
+    reverse = sort_dir != "asc"
+    with_value = [r for r in rows if r[column] is not None]
+    without_value = [r for r in rows if r[column] is None]
+    with_value.sort(key=lambda r: r[column], reverse=reverse)
+    return with_value + without_value
 
 
 def _resolve_doc_path(filepath: str) -> Path:
@@ -71,424 +116,519 @@ def _resolve_db_filepath(filepath: str, cfg: dict, base_from: str | None,
     return _resolve_doc_path(translated)
 
 
-def _render_home(cfg: dict, query: str, status: str, category: str | None, rows: list,
-                 db_categories: list[str] | None = None) -> str:
-    status_options = ["all", "pending", "filed"]
-    cfg_cats = cfg.get("categories", [])
-    # Merge config-defined categories with any category values present in the DB
-    categories = sorted(set(cfg_cats) | set(db_categories or []))
-
-    def _status_option(value: str) -> str:
-        selected = " selected" if value == status else ""
-        return f'<option value="{escape(value)}"{selected}>{escape(value.title())}</option>'
-
-    category_options = ['<option value="">All categories</option>']
-    for cat in categories:
-        selected = " selected" if category == cat else ""
-        category_options.append(f'<option value="{escape(cat)}"{selected}>{escape(cat)}</option>')
-
-    row_html: list[str] = []
-    if not rows:
-        row_html.append(
-            "<tr><td colspan=\"7\"><div class=\"empty\">No documents match this filter.</div></td></tr>"
-        )
-    else:
-        for row in rows:
-            row_html.append(
-                """
-                <tr>
-                    <td class="mono">{id}</td>
-                    <td>{filename}</td>
-                    <td>{detected_date}</td>
-                    <td>{category}</td>
-                    <td>{source}</td>
-                    <td>{status}</td>
-                    <td class="actions">
-                        <a class="btn subtle" href="/documents/{id}">Details</a>
-                        <a class="btn" href="/documents/{id}/content" target="_blank" rel="noopener noreferrer">View</a>
-                    </td>
-                </tr>
-                """.format(
-                    id=row["id"],
-                    filename=escape(_fmt(row["filename"])),
-                    detected_date=escape(_fmt(row["detected_date"])),
-                    category=escape(_fmt(row["category"])),
-                    source=escape(_fmt(row["classification_source"])),
-                    status=escape(_fmt(row["filing_status"])),
-                )
-            )
-
-    return f"""
-<!doctype html>
-<html lang="en">
-<head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>docorg browser</title>
-    <style>
-        :root {{
-            --ink: #1f1d1b;
-            --paper: #f8f4eb;
-            --paper-soft: #f2ece0;
-            --accent: #1f6f6d;
-            --accent-soft: #dcefeb;
-            --warm: #b7602a;
-            --line: #d7ccbc;
-            --radius: 14px;
-            --shadow: 0 12px 36px rgba(31, 29, 27, 0.1);
-        }}
-        * {{ box-sizing: border-box; }}
-        body {{
-            margin: 0;
-            color: var(--ink);
-            font-family: "Segoe UI", "Trebuchet MS", sans-serif;
-            background:
-                radial-gradient(circle at 10% -10%, #f7d4b8 0, transparent 40%),
-                radial-gradient(circle at 90% -20%, #c7e6de 0, transparent 45%),
-                var(--paper);
-            min-height: 100vh;
-        }}
-        .shell {{
-            width: min(1200px, 94vw);
-            margin: 28px auto;
-            background: rgba(255, 255, 255, 0.72);
-            backdrop-filter: blur(4px);
-            border: 1px solid rgba(215, 204, 188, 0.9);
-            border-radius: 24px;
-            box-shadow: var(--shadow);
-            overflow: hidden;
-        }}
-        .hero {{
-            padding: 24px;
-            background: linear-gradient(120deg, #174f4d, #1f6f6d 70%, #b7602a);
-            color: #f7f8f4;
-        }}
-        .hero h1 {{
-            margin: 0;
-            font-size: clamp(1.4rem, 2vw, 2rem);
-            letter-spacing: 0.02em;
-        }}
-        .hero p {{
-            margin: 8px 0 0;
-            opacity: 0.92;
-        }}
-        .filters {{
-            padding: 20px 24px;
-            background: linear-gradient(180deg, rgba(242, 236, 224, 0.5), transparent);
-            border-bottom: 1px solid var(--line);
-        }}
-        .filters form {{
-            display: grid;
-            gap: 12px;
-            grid-template-columns: 1.8fr 0.8fr 1fr auto;
-        }}
-        input, select {{
-            width: 100%;
-            padding: 10px 12px;
-            border-radius: var(--radius);
-            border: 1px solid var(--line);
-            background: #fff;
-            color: var(--ink);
-            font-size: 0.95rem;
-        }}
-        button {{
-            border: 0;
-            border-radius: var(--radius);
-            padding: 10px 16px;
-            font-weight: 600;
-            color: #fff;
-            background: var(--accent);
-            cursor: pointer;
-        }}
-        .table-wrap {{ padding: 18px 24px 26px; overflow-x: auto; }}
-        table {{ width: 100%; border-collapse: collapse; min-width: 920px; }}
-        th, td {{ padding: 10px 8px; text-align: left; border-bottom: 1px solid var(--line); }}
-        th {{
-            color: #51483f;
-            font-size: 0.82rem;
-            text-transform: uppercase;
-            letter-spacing: 0.08em;
-        }}
-        td {{ font-size: 0.93rem; }}
-        .mono {{ font-family: Consolas, "Lucida Console", monospace; }}
-        .actions {{ white-space: nowrap; }}
-        .btn {{
-            display: inline-block;
-            text-decoration: none;
-            padding: 6px 10px;
-            border-radius: 999px;
-            background: var(--accent);
-            color: #fff;
-            font-size: 0.85rem;
-            margin-right: 6px;
-        }}
-        .btn.subtle {{ background: var(--warm); }}
-        .empty {{
-            padding: 20px;
-            border: 1px dashed var(--line);
-            border-radius: var(--radius);
-            background: var(--paper-soft);
-            text-align: center;
-            color: #6f6154;
-        }}
-        @media (max-width: 860px) {{
-            .filters form {{ grid-template-columns: 1fr; }}
-            button {{ width: 100%; }}
-        }}
-    </style>
-</head>
-<body>
-    <div class="shell">
-        <section class="hero">
-            <h1>Document Browser</h1>
-            <p>Search, filter, and open filed PDFs from your docorganizer index.</p>
-        </section>
-        <section class="filters">
-            <form method="get" action="/">
-                <input type="search" name="q" value="{escape(query)}" placeholder="Search terms (FTS)" />
-                <select name="status">{''.join(_status_option(s) for s in status_options)}</select>
-                <select name="category">{''.join(category_options)}</select>
-                <button type="submit">Search</button>
-            </form>
-        </section>
-        <section class="table-wrap">
-            <table>
-                <thead>
-                    <tr>
-                        <th>ID</th>
-                        <th>Filename</th>
-                        <th>Date</th>
-                        <th>Category</th>
-                        <th>Source</th>
-                        <th>Status</th>
-                        <th>Actions</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {''.join(row_html)}
-                </tbody>
-            </table>
-        </section>
-    </div>
-</body>
-</html>
-"""
+def _doc_to_dict(row) -> dict:
+    return {
+        "id": row["id"],
+        "filename": row["filename"],
+        "filepath": row["filepath"],
+        "content_hash": row["content_hash"],
+        "file_size": row["file_size"],
+        "detected_date": row["detected_date"],
+        "category": row["category"],
+        "ai_suggested_category": row["ai_suggested_category"],
+        "classification_source": row["classification_source"],
+        "ai_rationale": row["ai_rationale"],
+        "ai_summary": row["ai_summary"],
+        "extracted_fields": parse_extracted_fields(row["extracted_fields"]),
+        "filing_status": row["filing_status"],
+        "last_reviewed_at": row["last_reviewed_at"],
+        "skipped": bool(row["skipped"]),
+        "created_at": row["created_at"],
+    }
 
 
-def _render_detail(row, file_exists: bool) -> str:
-    view_btn = ""
-    if file_exists:
-        view_btn = (
-            f'<a class="btn" href="/documents/{row["id"]}/content" '
-            'target="_blank" rel="noopener noreferrer">Open Document</a>'
-        )
-
-    extracted_fields = parse_extracted_fields(row["extracted_fields"])
-    ai_sections: list[str] = []
-    if row["ai_rationale"]:
-        ai_sections.append(
-            '<section class="ai-card">'
-            "<strong>AI rationale</strong>"
-            f"<p>{escape(row['ai_rationale'])}</p>"
-            "</section>"
-        )
-    if row["ai_summary"]:
-        ai_sections.append(
-            '<section class="ai-card">'
-            "<strong>Detailed summary</strong>"
-            f"<p>{escape(row['ai_summary'])}</p>"
-            "</section>"
-        )
-    if extracted_fields:
-        field_rows = "".join(
-            f"<div><dt>{escape(field_name.replace('_', ' ').title())}</dt><dd>{escape(field_value)}</dd></div>"
-            for field_name, field_value in extracted_fields.items()
-        )
-        ai_sections.append(
-            '<section class="ai-card">'
-            "<strong>Extracted fields</strong>"
-            f'<dl class="field-grid">{field_rows}</dl>'
-            "</section>"
-        )
-    ai_block = f'<div class="ai-stack">{"".join(ai_sections)}</div>' if ai_sections else ""
-
-    return f"""
-<!doctype html>
-<html lang="en">
-<head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>docorg document #{row['id']}</title>
-    <style>
-        :root {{
-            --ink: #241f1b;
-            --paper: #fcf9f2;
-            --line: #dfd1bf;
-            --accent: #2f6f73;
-            --warn: #9a3f2e;
-            --radius: 14px;
-        }}
-        body {{
-            margin: 0;
-            font-family: "Segoe UI", "Trebuchet MS", sans-serif;
-            background: linear-gradient(180deg, #f7f0e3, #fcf9f2);
-            color: var(--ink);
-        }}
-        main {{
-            width: min(860px, 92vw);
-            margin: 28px auto;
-            background: #fff;
-            border: 1px solid var(--line);
-            border-radius: 20px;
-            padding: 24px;
-        }}
-        h1 {{ margin-top: 0; font-size: 1.4rem; }}
-        dl {{
-            display: grid;
-            grid-template-columns: 170px 1fr;
-            gap: 10px 14px;
-            margin: 18px 0 24px;
-        }}
-        dt {{ color: #6c5f53; font-weight: 600; }}
-        dd {{ margin: 0; overflow-wrap: anywhere; }}
-        .ai-stack {{
-            display: grid;
-            gap: 12px;
-            margin-bottom: 20px;
-        }}
-        .ai-card {{
-            padding: 14px 16px;
-            border-radius: 12px;
-            background: #edf7f2;
-            border: 1px solid #b3ddc8;
-        }}
-        .ai-card strong {{
-            display: block;
-            color: #2f6f73;
-            margin-bottom: 6px;
-            font-size: 0.9rem;
-            text-transform: uppercase;
-            letter-spacing: 0.06em;
-        }}
-        .ai-card p {{ margin: 0; line-height: 1.5; }}
-        .field-grid {{
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-            gap: 10px 14px;
-            margin: 0;
-        }}
-        .field-grid div {{
-            padding: 10px 12px;
-            background: rgba(255, 255, 255, 0.55);
-            border-radius: 10px;
-        }}
-        .field-grid dt {{
-            color: #4f665f;
-            margin-bottom: 4px;
-        }}
-        .field-grid dd {{ margin: 0; }}
-        .toolbar {{ display: flex; gap: 10px; flex-wrap: wrap; }}
-        .btn {{
-            display: inline-block;
-            padding: 8px 14px;
-            border-radius: 999px;
-            text-decoration: none;
-            background: var(--accent);
-            color: #fff;
-            font-weight: 600;
-        }}
-        .btn.ghost {{ background: #62574c; }}
-        .notice {{
-            margin-top: 14px;
-            padding: 10px 12px;
-            border-radius: 10px;
-            border: 1px solid #ebd0cb;
-            background: #fff1ef;
-            color: var(--warn);
-        }}
-        @media (max-width: 700px) {{
-            dl {{ grid-template-columns: 1fr; gap: 6px; }}
-            dt {{ margin-top: 10px; }}
-        }}
-    </style>
-</head>
-<body>
-    <main>
-        <h1>Document #{row['id']} - {escape(_fmt(row['filename']))}</h1>
-        {ai_block}
-        <dl>
-            <dt>Date</dt><dd>{escape(_fmt(row['detected_date']))}</dd>
-            <dt>Category</dt><dd>{escape(_fmt(row['category']))}</dd>
-            <dt>Source</dt><dd>{escape(_fmt(row['classification_source']))}</dd>
-            <dt>Status</dt><dd>{escape(_fmt(row['filing_status']))}</dd>
-            <dt>Skipped</dt><dd>{'yes' if row['skipped'] else 'no'}</dd>
-            <dt>Created</dt><dd>{escape(_fmt(row['created_at']))}</dd>
-            <dt>Reviewed</dt><dd>{escape(_fmt(row['last_reviewed_at']))}</dd>
-            <dt>Path</dt><dd>{escape(_fmt(row['filepath']))}</dd>
-        </dl>
-        <div class="toolbar">
-            <a class="btn ghost" href="/">Back</a>
-            {view_btn}
-        </div>
-        {'' if file_exists else '<div class="notice">Document file is missing on disk. Check the stored filepath.</div>'}
-    </main>
-</body>
-</html>
-"""
+class DocumentPatch(BaseModel):
+    detected_date: str | None = None
+    category: str | None = None
 
 
-def create_app(cfg: dict) -> FastAPI:
-    app = FastAPI(title="docorg web")
+class ApplyAiRequest(BaseModel):
+    detected_date: str | None = None
+    category: str | None = None
+    rationale: str | None = None
+    summary: str | None = None
+    fields: dict[str, str] = {}
+
+
+class BulkAskAiRequest(BaseModel):
+    doc_ids: list[int]
+
+
+class CategoryCreate(BaseModel):
+    name: str
+
+
+class AiProfileCreate(BaseModel):
+    name: str
+    provider: str = "ollama"
+    model: str = ""
+    base_url: str = ""
+    api_key: str = ""
+    timeout: int = 180
+    max_tokens: int = 1200
+
+
+class AiProfileUpdate(BaseModel):
+    name: str | None = None
+    provider: str | None = None
+    model: str | None = None
+    base_url: str | None = None
+    api_key: str | None = None
+    timeout: int | None = None
+    max_tokens: int | None = None
+
+
+class AiProfileTestPayload(BaseModel):
+    provider: str = "ollama"
+    model: str = ""
+    base_url: str = ""
+    api_key: str = ""
+    timeout: int = 180
+    max_tokens: int = 1200
+
+
+def create_app(cfg: dict, config_path: Path | None = None) -> FastAPI:
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        observer = start_observer(cfg)
+        try:
+            yield
+        finally:
+            observer.stop()
+            observer.join()
+
+    app = FastAPI(title="docorg api", lifespan=lifespan)
     db_path = cfg["paths"]["database"]
     web_cfg = cfg.get("web", {})
     path_rewrites: list[dict] = web_cfg.get("path_rewrite", [])
     path_base_from: str | None = web_cfg.get("path_base_from")
     path_base_to: str | None = web_cfg.get("path_base_to")
+    cfg_path = config_path or Path("config.yaml")
 
-    @app.get("/", response_class=HTMLResponse)
-    def home(
+    _PAGE_SIZE = 25
+
+    def _profile_to_dict(row) -> dict:
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "provider": row["provider"],
+            "model": row["model"],
+            "base_url": row["base_url"],
+            "timeout": row["timeout"],
+            "max_tokens": row["max_tokens"],
+            "is_active": bool(row["is_active"]),
+            "has_key": bool(row["api_key"]),
+        }
+
+    api = APIRouter(prefix="/api")
+
+    @api.get("/documents")
+    def api_list_documents(
         q: str = Query(default="", max_length=200),
         status: str = Query(default="all", pattern="^(all|pending|filed)$"),
         category: str | None = Query(default=None),
-    ) -> HTMLResponse:
+        date_from: str | None = Query(default=None),
+        date_to: str | None = Query(default=None),
+        sort_by: str = Query(default="detected_date"),
+        sort_dir: str = Query(default="desc", pattern="^(asc|desc)$"),
+        page: int = Query(default=1, ge=1),
+    ):
+        resolved_from = _valid_iso_date(date_from)
+        resolved_to = _valid_iso_date(date_to)
+        resolved_sort_by = sort_by if sort_by in SORT_COLUMNS else "detected_date"
         with get_connection(db_path) as conn:
             db_categories = list_categories(conn)
             if q.strip():
                 rows = search_documents(conn, q.strip())
                 if status != "all":
-                    rows = [row for row in rows if row["filing_status"] == status]
+                    rows = [r for r in rows if r["filing_status"] == status]
                 if category:
-                    rows = [row for row in rows if row["category"] == category]
+                    rows = [r for r in rows if r["category"] == category]
+                if resolved_from:
+                    rows = [r for r in rows if (r["detected_date"] or "") >= resolved_from]
+                if resolved_to:
+                    rows = [r for r in rows if (r["detected_date"] or "") <= resolved_to]
+                rows = _sort_rows(rows, resolved_sort_by, sort_dir)
             else:
-                rows = list_documents(conn, status=status, category=category)
-        return HTMLResponse(_render_home(cfg, q, status, category, rows, db_categories=db_categories))
+                rows = list_documents(conn, status=status, category=category,
+                                      date_from=resolved_from, date_to=resolved_to,
+                                      sort_by=resolved_sort_by, sort_dir=sort_dir)
+        total = len(rows)
+        offset = (page - 1) * _PAGE_SIZE
+        page_rows = rows[offset: offset + _PAGE_SIZE]
+        categories_all = sorted(set(cfg.get("categories", [])) | set(db_categories))
+        return {
+            "items": [_doc_to_dict(r) for r in page_rows],
+            "total": total,
+            "page": page,
+            "page_size": _PAGE_SIZE,
+            "categories": categories_all,
+        }
 
-    @app.get("/documents/{doc_id}", response_class=HTMLResponse)
-    def document_detail(doc_id: int) -> HTMLResponse:
+    @api.get("/documents/{doc_id}")
+    def api_get_document(doc_id: int):
         with get_connection(db_path) as conn:
             row = get_document_by_id(conn, doc_id)
         if not row:
             raise HTTPException(status_code=404, detail="Document not found")
-        doc_path = _resolve_db_filepath(
-            row["filepath"], cfg, path_base_from, path_base_to, path_rewrites
-        )
-        file_exists = doc_path.exists()
-        return HTMLResponse(_render_detail(row, file_exists))
+        doc_path = _resolve_db_filepath(row["filepath"], cfg, path_base_from, path_base_to, path_rewrites)
+        data = _doc_to_dict(row)
+        data["file_exists"] = doc_path.exists()
+        return data
 
-    @app.get("/documents/{doc_id}/content")
-    def document_content(doc_id: int):
+    @api.get("/documents/{doc_id}/content")
+    def api_document_content(doc_id: int):
         with get_connection(db_path) as conn:
             row = get_document_by_id(conn, doc_id)
         if not row:
             raise HTTPException(status_code=404, detail="Document not found")
-
-        doc_path = _resolve_db_filepath(
-            row["filepath"], cfg, path_base_from, path_base_to, path_rewrites
-        )
+        doc_path = _resolve_db_filepath(row["filepath"], cfg, path_base_from, path_base_to, path_rewrites)
         if not doc_path.exists() or not doc_path.is_file():
             raise HTTPException(status_code=404, detail="Document file is missing")
-
         media_type = "application/pdf" if doc_path.suffix.lower() == ".pdf" else "application/octet-stream"
         return FileResponse(path=doc_path, filename=doc_path.name, media_type=media_type)
+
+    @api.patch("/documents/{doc_id}")
+    def api_patch_document(doc_id: int, patch: DocumentPatch):
+        fields_set = patch.model_fields_set
+        with get_connection(db_path) as conn:
+            row = get_document_by_id(conn, doc_id)
+            if not row:
+                raise HTTPException(status_code=404, detail="Document not found")
+
+            kwargs: dict = {}
+            if "detected_date" in fields_set and patch.detected_date:
+                try:
+                    date.fromisoformat(patch.detected_date)
+                except ValueError:
+                    raise HTTPException(status_code=422, detail="detected_date must be YYYY-MM-DD")
+                kwargs["detected_date"] = patch.detected_date
+            if "category" in fields_set:
+                cleaned = (patch.category or "").strip()
+                if cleaned:
+                    kwargs["category"] = cleaned
+                else:
+                    kwargs["clear_category"] = True
+
+            if kwargs:
+                update_document_fields(conn, doc_id, classification_source="manual", skipped=0, **kwargs)
+            row = get_document_by_id(conn, doc_id)
+        return _doc_to_dict(row)
+
+    @api.post("/documents/{doc_id}/ask-ai")
+    def api_ask_ai(doc_id: int):
+        with get_connection(db_path) as conn:
+            row = get_document_by_id(conn, doc_id)
+            if not row:
+                raise HTTPException(status_code=404, detail="Document not found")
+            ai_cfg = resolve_ai_config(cfg, conn)
+            if ai_cfg is None:
+                return {"suggestion": None, "error": "No AI profile is active. Activate one in Settings."}
+            suggestion = suggest_date_category(
+                text=row["extracted_text"] or "",
+                filename=row["filename"],
+                categories=cfg.get("categories", []),
+                ai_cfg=ai_cfg,
+            )
+        if not suggestion:
+            error = getattr(suggest_date_category, "last_error", "") or "AI suggestion unavailable."
+            return {"suggestion": None, "error": error}
+        return {"suggestion": suggestion, "error": None}
+
+    @api.post("/documents/{doc_id}/apply-ai")
+    def api_apply_ai(doc_id: int, payload: ApplyAiRequest):
+        with get_connection(db_path) as conn:
+            row = get_document_by_id(conn, doc_id)
+            if not row:
+                raise HTTPException(status_code=404, detail="Document not found")
+
+            update_document_fields(
+                conn, doc_id,
+                detected_date=payload.detected_date or None,
+                category=payload.category or None,
+                ai_suggested_category=payload.category or None,
+                classification_source="ai",
+                ai_rationale=payload.rationale or None,
+                ai_summary=payload.summary or None,
+                extracted_fields=payload.fields or None,
+                skipped=0,
+            )
+
+            if payload.detected_date:
+                try:
+                    src = resolve_stored_path(row["filepath"], cfg)
+                    if src.exists():
+                        doc_date = date.fromisoformat(payload.detected_date)
+                        dest = file_document(
+                            src,
+                            documents_root=cfg["paths"]["documents"],
+                            doc_date=doc_date,
+                            category=payload.category or row["category"],
+                        )
+                        update_document_fields(conn, doc_id, filepath=to_stored_path(dest, cfg))
+                except ValueError:
+                    pass
+
+            row = get_document_by_id(conn, doc_id)
+        return _doc_to_dict(row)
+
+    @api.post("/documents/{doc_id}/refile")
+    def api_refile(doc_id: int):
+        with get_connection(db_path) as conn:
+            row = get_document_by_id(conn, doc_id)
+            if not row:
+                raise HTTPException(status_code=404, detail="Document not found")
+            if not row["detected_date"]:
+                raise HTTPException(status_code=400, detail="Cannot refile without a detected date")
+            src = resolve_stored_path(row["filepath"], cfg)
+            if not src.exists():
+                raise HTTPException(status_code=400, detail="Source file missing on disk")
+            doc_date = date.fromisoformat(row["detected_date"])
+            dest = file_document(
+                src, documents_root=cfg["paths"]["documents"], doc_date=doc_date, category=row["category"],
+            )
+            update_document_fields(
+                conn, doc_id, filepath=to_stored_path(dest, cfg), filing_status="filed", skipped=0,
+            )
+            row = get_document_by_id(conn, doc_id)
+        return _doc_to_dict(row)
+
+    @api.post("/documents/{doc_id}/skip")
+    def api_skip(doc_id: int):
+        with get_connection(db_path) as conn:
+            row = get_document_by_id(conn, doc_id)
+            if not row:
+                raise HTTPException(status_code=404, detail="Document not found")
+            update_document_fields(conn, doc_id, skipped=1)
+            row = get_document_by_id(conn, doc_id)
+        return _doc_to_dict(row)
+
+    @api.delete("/documents/{doc_id}", status_code=204)
+    def api_delete(doc_id: int):
+        with get_connection(db_path) as conn:
+            row = get_document_by_id(conn, doc_id)
+            if not row:
+                raise HTTPException(status_code=404, detail="Document not found")
+            conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
+            conn.commit()
+        return None
+
+    @api.post("/upload")
+    def api_upload(file: UploadFile = File(...)):
+        # Staged in a private temp dir, never the watched inbox folder — writing
+        # into `inbox` would race the background watcher, which would also pick
+        # up the same file and process it concurrently.
+        name = Path(file.filename or "").name
+        if not name.lower().endswith(".pdf"):
+            return {"status": "not_pdf", "filename": name}
+
+        with get_connection(db_path) as conn:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                staged = Path(tmp_dir) / name
+                with staged.open("wb") as out:
+                    out.write(file.file.read())
+                try:
+                    result = process_pdf(staged, cfg=cfg, conn=conn)
+                except Exception as exc:
+                    return {"status": "failed", "filename": name, "message": str(exc)}
+
+        if result["status"] == "filed":
+            return {
+                "status": "filed",
+                "filename": name,
+                "doc_id": result["doc_id"],
+                "dest": result["dest"],
+                "detected_date": result["detected_date"],
+                "category": result["category"],
+            }
+        if result["status"] == "duplicate":
+            return {"status": "duplicate", "filename": name, "path": result["path"]}
+        return {"status": result["status"], "filename": name}
+
+    @api.post("/documents/bulk-ask-ai")
+    def api_bulk_ask_ai(payload: BulkAskAiRequest):
+        doc_ids = payload.doc_ids
+
+        def _events():
+            with get_connection(db_path) as conn:
+                ai_cfg = resolve_ai_config(cfg, conn)
+                categories_cfg = cfg.get("categories", [])
+                if ai_cfg is None:
+                    for doc_id in doc_ids:
+                        yield f"data: {json.dumps({'doc_id': doc_id, 'status': 'error', 'error': 'No AI profile is active. Activate one in Settings.'})}\n\n"
+                    yield f"data: {json.dumps({'status': 'done'})}\n\n"
+                    return
+                for doc_id in doc_ids:
+                    row = get_document_by_id(conn, doc_id)
+                    if not row:
+                        yield f"data: {json.dumps({'doc_id': doc_id, 'status': 'error', 'error': 'Document not found'})}\n\n"
+                        continue
+                    suggestion = suggest_date_category(
+                        text=row["extracted_text"] or "",
+                        filename=row["filename"],
+                        categories=categories_cfg,
+                        ai_cfg=ai_cfg,
+                    )
+                    if not suggestion:
+                        error = getattr(suggest_date_category, "last_error", "") or "AI suggestion unavailable."
+                        yield f"data: {json.dumps({'doc_id': doc_id, 'status': 'error', 'error': error})}\n\n"
+                    else:
+                        yield f"data: {json.dumps({'doc_id': doc_id, 'status': 'suggested', 'suggestion': suggestion})}\n\n"
+            yield f"data: {json.dumps({'status': 'done'})}\n\n"
+
+        return StreamingResponse(_events(), media_type="text/event-stream")
+
+    @api.get("/categories")
+    def api_list_categories():
+        configured = get_configured_categories(cfg_path)
+        with get_connection(db_path) as conn:
+            db_cats = list_categories(conn)
+        return {"configured": configured, "db_only": sorted(set(db_cats) - set(configured))}
+
+    @api.post("/categories", status_code=201)
+    def api_add_category(payload: CategoryCreate):
+        name = payload.name.strip()
+        if not name:
+            raise HTTPException(status_code=422, detail="Category name is required")
+        added = add_configured_category(cfg_path, name)
+        if not added:
+            raise HTTPException(status_code=409, detail="Category already exists")
+        return {"name": name}
+
+    @api.delete("/categories/{name}", status_code=204)
+    def api_remove_category(name: str):
+        removed = remove_configured_category(cfg_path, name)
+        if not removed:
+            raise HTTPException(status_code=404, detail="Category not found")
+        return None
+
+    @api.get("/ai-profiles")
+    def api_list_ai_profiles():
+        with get_connection(db_path) as conn:
+            ensure_ai_profiles_seeded(cfg, conn)
+            rows = list_ai_profiles(conn)
+        return [_profile_to_dict(r) for r in rows]
+
+    @api.post("/ai-profiles", status_code=201)
+    def api_create_ai_profile(payload: AiProfileCreate):
+        name = payload.name.strip()
+        if not name:
+            raise HTTPException(status_code=422, detail="Profile name is required")
+        if payload.provider == "custom" and not payload.base_url.strip():
+            raise HTTPException(status_code=422, detail="Custom provider requires a Base URL")
+        with get_connection(db_path) as conn:
+            profile_id = insert_ai_profile(
+                conn, name=name, provider=payload.provider, model=payload.model.strip(),
+                base_url=payload.base_url.strip(), api_key=payload.api_key.strip(),
+                timeout=payload.timeout, max_tokens=payload.max_tokens,
+            )
+            row = get_ai_profile(conn, profile_id)
+        return _profile_to_dict(row)
+
+    @api.patch("/ai-profiles/{profile_id}")
+    def api_update_ai_profile(profile_id: int, payload: AiProfileUpdate):
+        fields_set = payload.model_fields_set
+        with get_connection(db_path) as conn:
+            existing = get_ai_profile(conn, profile_id)
+            if not existing:
+                raise HTTPException(status_code=404, detail="AI profile not found")
+
+            kwargs: dict = {}
+            if "name" in fields_set:
+                name = (payload.name or "").strip()
+                if not name:
+                    raise HTTPException(status_code=422, detail="Profile name is required")
+                kwargs["name"] = name
+            if "provider" in fields_set:
+                kwargs["provider"] = payload.provider
+            if "model" in fields_set:
+                kwargs["model"] = (payload.model or "").strip()
+            if "base_url" in fields_set:
+                kwargs["base_url"] = (payload.base_url or "").strip()
+            if "api_key" in fields_set and (payload.api_key or "").strip():
+                kwargs["api_key"] = payload.api_key.strip()
+            if "timeout" in fields_set:
+                kwargs["timeout"] = payload.timeout
+            if "max_tokens" in fields_set:
+                kwargs["max_tokens"] = payload.max_tokens
+
+            resolved_provider = kwargs.get("provider", existing["provider"])
+            resolved_base_url = kwargs.get("base_url", existing["base_url"])
+            if resolved_provider == "custom" and not resolved_base_url.strip():
+                raise HTTPException(status_code=422, detail="Custom provider requires a Base URL")
+
+            if kwargs:
+                update_ai_profile(conn, profile_id, **kwargs)
+            row = get_ai_profile(conn, profile_id)
+        return _profile_to_dict(row)
+
+    @api.delete("/ai-profiles/{profile_id}", status_code=204)
+    def api_delete_ai_profile(profile_id: int):
+        with get_connection(db_path) as conn:
+            existing = get_ai_profile(conn, profile_id)
+            if not existing:
+                raise HTTPException(status_code=404, detail="AI profile not found")
+            delete_ai_profile(conn, profile_id)
+        return None
+
+    @api.post("/ai-profiles/{profile_id}/activate")
+    def api_activate_ai_profile(profile_id: int):
+        with get_connection(db_path) as conn:
+            existing = get_ai_profile(conn, profile_id)
+            if not existing:
+                raise HTTPException(status_code=404, detail="AI profile not found")
+            set_active_ai_profile(conn, profile_id)
+            row = get_ai_profile(conn, profile_id)
+        return _profile_to_dict(row)
+
+    @api.post("/ai-profiles/test")
+    def api_test_ai_profile_draft(payload: AiProfileTestPayload):
+        if payload.provider == "custom" and not payload.base_url.strip():
+            return {"ok": False, "message": "Custom provider requires a Base URL."}
+        ok, message = test_provider_connection({
+            "provider": payload.provider, "model": payload.model, "base_url": payload.base_url,
+            "api_key": payload.api_key, "timeout": payload.timeout, "max_tokens": payload.max_tokens,
+        })
+        return {"ok": ok, "message": message}
+
+    @api.post("/ai-profiles/{profile_id}/test")
+    def api_test_ai_profile(profile_id: int, payload: AiProfileTestPayload):
+        with get_connection(db_path) as conn:
+            existing = get_ai_profile(conn, profile_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="AI profile not found")
+        if payload.provider == "custom" and not payload.base_url.strip():
+            return {"ok": False, "message": "Custom provider requires a Base URL."}
+        api_key = payload.api_key.strip() or existing["api_key"]
+        ok, message = test_provider_connection({
+            "provider": payload.provider, "model": payload.model, "base_url": payload.base_url,
+            "api_key": api_key, "timeout": payload.timeout, "max_tokens": payload.max_tokens,
+        })
+        return {"ok": ok, "message": message}
+
+    @api.get("/meta")
+    def api_meta():
+        return {"provider_defaults": PROVIDER_DEFAULTS, "default_settings": DEFAULT_AI_SETTINGS}
+
+    app.include_router(api)
+
+    # Built frontend assets (present in the Docker image after the Node build
+    # stage; absent in local dev, where the Vite dev server is used instead).
+    static_dir = Path(__file__).resolve().parent / "static"
+    if static_dir.exists():
+        assets_dir = static_dir / "assets"
+        if assets_dir.exists():
+            app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+        index_file = static_dir / "index.html"
+
+        @app.get("/{full_path:path}")
+        def spa_fallback(full_path: str):
+            if full_path.startswith("api/"):
+                raise HTTPException(status_code=404, detail="Not found")
+            candidate = static_dir / full_path
+            if full_path and candidate.is_file():
+                return FileResponse(candidate)
+            return FileResponse(index_file)
 
     return app

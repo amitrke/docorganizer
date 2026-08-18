@@ -8,6 +8,16 @@ from .database import get_connection
 from .processor import process_pdf
 
 
+def _is_retryable_file_error(exc: Exception) -> bool:
+    if isinstance(exc, PermissionError):
+        return True
+    if isinstance(exc, OSError):
+        err_no = getattr(exc, "errno", None)
+        win_err = getattr(exc, "winerror", None)
+        return err_no in {13, 16} or win_err in {32, 33}
+    return False
+
+
 class _PDFHandler(FileSystemEventHandler):
     def __init__(self, cfg: dict) -> None:
         self._cfg = cfg
@@ -20,11 +30,31 @@ class _PDFHandler(FileSystemEventHandler):
         if path.suffix.lower() != ".pdf":
             return
 
-        # Brief pause to ensure the file is fully written before we open it
-        time.sleep(0.5)
+        watch_cfg = self._cfg.get("watch", {})
+        max_retries = int(watch_cfg.get("max_retries", 8))
+        retry_delay_seconds = float(watch_cfg.get("retry_delay_seconds", 0.5))
+        retry_backoff = float(watch_cfg.get("retry_backoff", 1.5))
+        retry_max_delay_seconds = float(watch_cfg.get("retry_max_delay_seconds", 3.0))
 
-        with get_connection(self._db_path) as conn:
-            result = process_pdf(path, cfg=self._cfg, conn=conn)
+        delay = retry_delay_seconds
+        result = None
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                with get_connection(self._db_path) as conn:
+                    result = process_pdf(path, cfg=self._cfg, conn=conn)
+                break
+            except Exception as exc:  # keep watchdog thread alive on processing failures
+                if _is_retryable_file_error(exc) and attempt < max_retries:
+                    time.sleep(delay)
+                    delay = min(delay * retry_backoff, retry_max_delay_seconds)
+                    continue
+
+                print(f"[error]     Failed to process {path}: {exc}")
+                return
+
+        if result is None:
+            return
 
         if result["status"] == "filed":
             print(
@@ -38,7 +68,8 @@ class _PDFHandler(FileSystemEventHandler):
             print(f"[duplicate] {result['path']} — already in database, skipped.")
 
 
-def start_watcher(cfg: dict) -> None:
+def start_observer(cfg: dict) -> Observer:
+    """Start a background inbox watcher. Caller is responsible for stop()/join() on shutdown."""
     inbox = cfg["paths"]["inbox"]
     Path(inbox).mkdir(parents=True, exist_ok=True)
 
@@ -47,10 +78,5 @@ def start_watcher(cfg: dict) -> None:
     observer.schedule(handler, path=inbox, recursive=False)
     observer.start()
 
-    print(f"Watching {inbox}  (Ctrl+C to stop)")
-    try:
-        while observer.is_alive():
-            observer.join(timeout=1)
-    except KeyboardInterrupt:
-        observer.stop()
-    observer.join()
+    print(f"Watching {inbox}")
+    return observer

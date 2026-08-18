@@ -5,12 +5,37 @@ Called by both the file watcher (auto mode) and the CLI process command.
 import hashlib
 import sqlite3
 from pathlib import Path
+from typing import Iterable
 
 from .database import document_exists, document_exists_by_hash, insert_document, update_filing
 from .date_detector import detect_date
 from .extractor import extract_text
 from .filer import file_document
 from .pathing import to_stored_path
+
+
+def _normalize_terms(terms: Iterable[str] | None) -> list[str]:
+    if not terms:
+        return []
+    normalized: list[str] = []
+    for term in terms:
+        value = str(term).strip().lower()
+        if value:
+            normalized.append(value)
+    return normalized
+
+
+def _match_count(terms: Iterable[str], haystack: str) -> int:
+    return sum(1 for term in terms if term and term in haystack)
+
+
+def _weighted_hits(terms: Iterable[str], haystack: str) -> float:
+    # Longer phrases are stronger signals than single words.
+    score = 0.0
+    for term in terms:
+        if term and term in haystack:
+            score += 1.0 + min(1.0, 0.25 * term.count(" "))
+    return score
 
 
 def _sha256_for_file(path: Path, *, chunk_size: int = 1024 * 1024) -> str:
@@ -35,7 +60,8 @@ def _build_analysis(pdf_path: Path, *, cfg: dict) -> dict:
     )
 
     rules: list[dict] = cfg.get("rules", [])
-    category = _match_category(text, pdf_path.name, rules)
+    classifier_cfg: dict = cfg.get("classification", {})
+    category = _match_category(text, pdf_path.name, rules, classifier_cfg=classifier_cfg)
     classification_source = "rules" if (doc_date or category) else "fallback"
 
     return {
@@ -71,26 +97,85 @@ def analyze_pdf(pdf_path: str | Path, *, cfg: dict, conn: sqlite3.Connection) ->
     }
 
 
-def _match_category(text: str, filename: str, rules: list[dict]) -> str | None:
+def _match_category(
+    text: str,
+    filename: str,
+    rules: list[dict],
+    *,
+    classifier_cfg: dict | None = None,
+) -> str | None:
     """
     Evaluate extracted text and filename against mapping rules.
     Returns the category of the highest-priority (lowest numeric) matching rule,
     or None if no rule matches (F21, F22, F23).
     """
     combined = f"{filename}\n{text}".lower()
+    filename_lower = filename.lower()
+    cfg = classifier_cfg or {}
+    min_score = float(cfg.get("min_score", 1.0))
+    min_score_gap = float(cfg.get("min_score_gap", 0.75))
+    negative_weight = float(cfg.get("negative_weight", 1.25))
 
-    matched: list[dict] = []
+    category_scores: dict[str, float] = {}
+
     for rule in rules:
-        for kw in rule.get("keywords", []):
-            if kw.lower() in combined:
-                matched.append(rule)
-                break  # one keyword match is enough per rule
+        category = rule.get("category")
+        if not category:
+            continue
 
-    if not matched:
+        keywords = _normalize_terms(rule.get("keywords"))
+        any_keywords = _normalize_terms(rule.get("any_keywords"))
+        all_keywords = _normalize_terms(rule.get("all_keywords"))
+        filename_keywords = _normalize_terms(rule.get("filename_keywords"))
+        exclude_keywords = _normalize_terms(rule.get("exclude_keywords"))
+        negative_keywords = _normalize_terms(rule.get("negative_keywords"))
+
+        # Hard exclusions for known collisions.
+        if _match_count(exclude_keywords, combined) > 0:
+            continue
+
+        # Support grouped rule semantics for higher precision.
+        if any_keywords and _match_count(any_keywords, combined) == 0:
+            continue
+        if all_keywords and _match_count(all_keywords, combined) != len(all_keywords):
+            continue
+
+        positive_score = 0.0
+        positive_score += _weighted_hits(keywords, combined)
+        positive_score += _weighted_hits(any_keywords, combined)
+        positive_score += _weighted_hits(all_keywords, combined)
+        positive_score += 1.5 * _weighted_hits(filename_keywords, filename_lower)
+
+        if positive_score <= 0:
+            continue
+
+        penalty = negative_weight * _match_count(negative_keywords, combined)
+        rule_score = positive_score - penalty
+        if rule_score <= 0:
+            continue
+
+        # Lower priority value is better; treat as a mild bonus, not a hard tie-break.
+        priority = int(rule.get("priority", 999))
+        priority_bonus = max(0.0, (100.0 - min(priority, 100)) / 100.0)
+        rule_score += 0.2 * priority_bonus
+
+        category_scores[category] = category_scores.get(category, 0.0) + rule_score
+
+    if not category_scores:
         return None
 
-    best = min(matched, key=lambda r: r.get("priority", 999))
-    return best.get("category")
+    ranked = sorted(category_scores.items(), key=lambda item: (-item[1], item[0]))
+    best_category, best_score = ranked[0]
+
+    if best_score < min_score:
+        return None
+
+    if len(ranked) > 1:
+        second_score = ranked[1][1]
+        if (best_score - second_score) < min_score_gap:
+            return None
+
+    return best_category
 
 
 def process_pdf(

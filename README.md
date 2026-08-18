@@ -1,154 +1,66 @@
 # docorganizer
 
-A Python CLI tool that ingests scanned PDF documents, extracts their text, organises them into a `documents/YYYY/MM/<category>/` folder hierarchy, and stores everything in a searchable local SQLite database.
+A self-hosted web app that ingests scanned PDF documents, extracts their text, organises them into a `documents/YYYY/MM/<category>/` folder hierarchy, and stores everything in a searchable local SQLite database. Everything happens in the browser — there is no CLI. A single Docker container serves the UI, watches a mounted inbox folder for new scans, and accepts direct uploads.
+
+The backend (`docorg/`, FastAPI) is a JSON API; the UI (`frontend/`) is a React + TypeScript single-page app built with Vite and served by the same container as static assets.
 
 ---
 
-## Requirements
-
-- Python 3.10+
-- [Ollama](https://ollama.com) (optional — only needed for AI-assisted classification and field extraction)
-
----
-
-## Installation
+## Quick start (Docker)
 
 ```sh
-# Clone and enter the repo
-git clone <repo-url>
-cd docorganizer
+docker compose up -d
+```
 
-# Create and activate a virtual environment
+Open `http://localhost:8000`. Then either:
+
+- Drag PDFs into the mounted `scans/` folder (see `docker-compose.yml` for the host path), or
+- Use the **Upload PDFs** button on the home page.
+
+Either way, new documents are deduplicated (SHA-256), dated, categorised via the rules in `config.yaml`, and filed under `documents/YYYY/MM/<category>/` automatically. Anything that came out wrong is fixed afterwards from the browser (see below) — nothing needs to be re-run.
+
+---
+
+## What the web UI does
+
+- **Browse & search** — full-text search (SQLite FTS5) across all indexed documents, with status/category filters and date-range presets (last 7/30/90 days, this year, last year, or a custom range).
+- **Upload** — drag-and-drop or pick multiple PDFs at once, each with its own live progress bar; they're processed immediately, the same way a dropped file in `scans/` is.
+- **Multi-select + bulk Ask AI** — select several documents from the browse table and run them through AI together; suggestions stream in per-document as they're ready, with per-item or "apply all ready" actions.
+- **Document detail page** — edit the detected date/category, **Ask AI** for a suggestion (preview it, then Apply), re-file to the correct folder, mark as skipped, or delete the database row (this does not delete the PDF from disk).
+- **AI Settings page** — save multiple named AI provider configs (e.g. "Local Ollama", "NVIDIA free") — local **Ollama**, **OpenRouter**, **NVIDIA**, **Mistral**, **DeepSeek**, **Google Gemini**, **Poe**, or any other **custom OpenAI-compatible endpoint** (self-hosted LiteLLM/vLLM/llama.cpp/LM Studio, etc.) — each remembering its own model and API key, and switch which one is active with one click via "Activate". "Test connection" checks a config before or after saving it. Multiple comma-separated API keys within a config rotate automatically on rate limits (HTTP 429).
+- **Categories page** — add/remove the categories used by classification rules.
+
+---
+
+## Local development (without Docker)
+
+The backend (JSON API) and frontend (React SPA) run as two separate processes in development — the frontend's dev server proxies `/api` requests to the backend, so there's no CORS setup needed.
+
+**Backend:**
+
+```sh
 python -m venv .venv
 .venv\Scripts\activate        # Windows
 # source .venv/bin/activate   # macOS / Linux
-
-# Install
 pip install -e .
+docorg                        # DOCORG_CONFIG=config.yaml, DOCORG_HOST=0.0.0.0, DOCORG_PORT=8000
 ```
 
-> **OCR support**: `pip install -e ".[ocr]"` — also requires Tesseract installed on the system.
->
-> When a PDF page has no selectable text, docorganizer automatically falls back to OCR for that page.
+Override with env vars as needed, e.g. `DOCORG_CONFIG=config.yaml DOCORG_HOST=127.0.0.1 DOCORG_PORT=8000 docorg` (`docorg` is a thin wrapper around `python -m docorg`).
 
----
+> **OCR support**: `pip install -e ".[ocr]"` — also requires Tesseract installed on the system. When a PDF page has no selectable text, docorganizer automatically falls back to OCR for that page.
 
-## Quick start
-
-1. Drop one or more PDFs into the `scans/` folder.
-2. Run `docorg watch` — the tool will detect, categorise, and file them automatically.
-
----
-
-## Commands
-
-### Watch the inbox (auto mode)
-
-Monitors `scans/` for new PDFs and processes each one as it arrives.
+**Frontend** (in a second terminal):
 
 ```sh
-docorg watch
-docorg watch --config /path/to/config.yaml   # custom config location
+cd frontend
+npm install
+npm run dev
 ```
 
-### Process files immediately
+Open `http://localhost:5173` — this is the dev UI, hot-reloading, proxying API calls to the backend on port 8000 (see `frontend/vite.config.ts`).
 
-Process one or more specific PDFs right now, without the watcher.
-
-```sh
-docorg process scans/invoice.pdf
-docorg process scans/invoice.pdf scans/statement.pdf
-docorg process scans/invoice.pdf --mode interactive
-```
-
-Interactive mode lets you file as-is, edit detected date/category, ask AI (on-demand), or skip. When AI is used, docorganizer can also store a rationale, a detailed summary, and extracted key-value facts.
-
-### Search indexed documents
-
-Full-text search across all extracted document content.
-
-```sh
-docorg search "hospital bill"
-docorg search "income tax 2024"
-```
-
-Output columns: `filename`, `detected date`, `category`, `filepath`.
-
-### Browse documents in a web UI
-
-Launch a local browser UI to search, filter, and open indexed documents.
-
-```sh
-pip install -e ".[web]"
-docorg web
-docorg web --host 0.0.0.0 --port 8080
-```
-
-Open `http://127.0.0.1:8000` in your browser.
-
-### Manage categories
-
-Categories are stored in `config.yaml`. These commands edit the file directly — no code changes needed.
-
-```sh
-docorg category list
-docorg category add transport
-docorg category remove transport
-```
-
-### Review and correction workflow
-
-Review indexed documents, edit metadata, trigger AI suggestions on demand, and re-file corrected documents.
-
-```sh
-docorg review list --status all
-docorg review set-date 12 2026-05-01
-docorg review set-category 12 health
-docorg review ask-ai 12
-docorg review ask-ai 12 --apply
-docorg review ask-ai-bulk --status filed --source-filter not-ai
-docorg review ask-ai-bulk --source-filter not-ai --from-date 2025-01-01 --to-date 2025-12-31 --apply
-docorg review refile 12
-docorg review skip 12
-docorg review delete 12
-docorg review delete --apply 12
-docorg review clear-legacy
-docorg review clear-legacy --apply
-```
-
-`docorg review ask-ai <id>` previews AI suggestions (date, category, rationale, summary, extracted fields) without saving. Add `--apply` to persist the results to the database.
-
-`docorg review ask-ai-bulk` runs AI suggestions over multiple rows using filters (`--status`, `--source-filter`, `--category`, `--from-date`, `--to-date`, `--limit`). It previews by default; add `--apply` to write changes.
-
-When applied, docorganizer stores both the final `category` and an `ai_suggested_category` value so you can keep AI provenance even after later manual category edits.
-
-### Interactive TUI
-
-A full-screen terminal UI for browsing and editing all indexed documents.
-
-```sh
-docorg review tui
-docorg review tui --status all    # include already-filed documents
-```
-
-Key bindings:
-
-| Key | Action |
-|-----|--------|
-| `↑` / `↓` | Navigate document list |
-| `a` | Ask AI — shows suggestion dialog; press Apply to save |
-| `d` | Edit detected date |
-| `c` | Edit category |
-| `r` | Re-file document to its current date/category folder |
-| `s` | Toggle skip flag |
-| `Ctrl+R` | Refresh list |
-| `q` | Quit |
-
-The `[a]` AI dialog is the fastest way to enrich existing documents with rationale, a detailed summary, and extracted key-value fields (e.g. `total_amount`, `location`). It calls Ollama on demand and lets you review the suggestion before committing.
-
-`docorg review delete` previews matching rows by ID and only removes them from the database when `--apply` is passed. It does not delete the actual PDF files from disk.
-
-`docorg review clear-legacy` previews rows whose `filepath` still uses host-specific legacy values instead of the host-neutral `documents/...` or `inbox/...` format. Pass `--apply` to remove those legacy rows from the database.
+**Building for production** (what the Docker image does): `cd frontend && npm run build` produces `frontend/dist/`, which gets copied to `docorg/static/` and served by the backend directly — at that point there's just one process/port again, same as the Docker deployment.
 
 ---
 
@@ -166,9 +78,7 @@ documents/
       invoice_001.pdf        ← no category detected
 ```
 
-If two files land in the same folder with the same name, a counter is appended automatically (`invoice_001_2.pdf`, etc.).
-
-Duplicate detection uses SHA-256 content hashing plus existing path checks, so the same PDF content is skipped even when copied with a different filename.
+If two files land in the same folder with the same name, a counter is appended automatically (`invoice_001_2.pdf`, etc.). Duplicate detection uses SHA-256 content hashing plus existing path checks, so the same PDF content is skipped even when uploaded or dropped with a different filename.
 
 ---
 
@@ -176,12 +86,15 @@ Duplicate detection uses SHA-256 content hashing plus existing path checks, so t
 
 ```yaml
 paths:
-  inbox: scans          # watch folder
+  inbox: scans          # watched folder + upload landing zone
   documents: documents  # organised output root
   database: docorganizer.db
 
-processing:
-  mode: auto            # auto | interactive (interactive = Phase 5)
+classification:
+  # Category assignment uses weighted scoring instead of first keyword hit.
+  min_score: 1.0        # minimum winning score required
+  min_score_gap: 0.75   # winner must beat runner-up by this margin
+  negative_weight: 1.25 # penalty multiplier for negative keyword hits
 
 date_detection:
   # Keywords used to find label-prefixed dates before generic date parsing.
@@ -205,7 +118,7 @@ categories:
   - finance
 
 # Mapping rules: keywords matched against filename + extracted text.
-# Lower priority number = higher precedence when multiple rules match.
+# Lower priority number provides a small tie-break bonus.
 rules:
   - keywords: [doctor, clinic, hospital, prescription]
     category: health
@@ -213,32 +126,35 @@ rules:
   - keywords: [income tax, itr, form 16, tds]
     category: tax
     priority: 10
+  - category: education
+    any_keywords: [public schools, school district]
+    exclude_keywords: [tax return]
+    negative_keywords: [form 1040]
+    filename_keywords: [school]
+    priority: 10
 
+# Optional first-run seed: migrated into a "Default" AI config the first time
+# the AI Settings page is opened on a database with none saved yet. After
+# that, configs live in the database (see AI Settings in the browser) and
+# this block is no longer read.
 ai:
   enabled: false
-  model: mistral:7b-instruct   # default (RTX 3080 / >=6 GB VRAM)
-  # lighter alternatives: llama3.2:3b, phi3:mini
+  model: mistral:7b-instruct
   ollama_url: http://localhost:11434
-  timeout: 180                 # seconds for Ollama response
-  max_tokens: 768              # response budget; increase if JSON gets truncated
+  timeout: 180
+  max_tokens: 768
 ```
 
-To use AI-assisted classification, set `ai.enabled: true` and ensure Ollama is running with your chosen model pulled (`ollama pull mistral:7b-instruct`). AI suggestions can also persist a detailed summary plus extracted fields such as `total_amount`, `location`, or other explicit document facts when the model can find them reliably.
+Supported rule fields (all optional except `category`):
+
+- `keywords`: positive terms (legacy behavior, still supported)
+- `any_keywords`: at least one must match
+- `all_keywords`: every term must match
+- `filename_keywords`: positive terms checked against filename only (higher weight)
+- `exclude_keywords`: hard block list; rule is skipped if any match
+- `negative_keywords`: soft penalties to reduce false positives
+- `priority`: lower numbers provide a mild bonus when scores are close
+
+Categories and their `rules` are managed by editing `config.yaml` directly (the Categories page in the browser only adds/removes the category list, not the rules); AI provider settings are managed from the browser's Settings page instead.
 
 Date detection priority is: filename date -> keyword-prefixed text date -> generic text date -> file modified date fallback.
-
----
-
-## Phased delivery
-
-| Phase | Status | Deliverable |
-|-------|--------|-------------|
-| 1 | ✅ Done | File watcher → text extraction → SQLite storage → folder move |
-| 2 | ✅ Done | OCR fallback for non-searchable pages (Tesseract) |
-| 3 | ✅ Done | Date detection via regex + keyword heuristics + filename priority |
-| 4 | ✅ Done | Category management + mapping rules + category-aware filing |
-| 5 | ✅ Done | Interactive ingestion mode (`docorg process --mode interactive`) |
-| 6 | ✅ Done (CLI) | Review workflow (`docorg review ...`) for edit, skip, and re-file |
-| 7 | ✅ Done (on-demand) | AI-assisted suggestions via Ollama (`docorg review ask-ai`, interactive ask-ai) |
-| 8 | ✅ Done | CLI search via SQLite FTS5 (`docorg search`) |
-| 9 | ✅ Done (FastAPI MVP) | Browser UI for search, filters, detail, and document view |

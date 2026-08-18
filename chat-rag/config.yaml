@@ -1,0 +1,17 @@
+# chat-rag/config.yaml
+# Local (non-Docker) defaults for chat-rag.
+
+paths:
+  # Point this to the same SQLite DB used by docorganizer.
+  database: Y:\docsorg\config\docorganizer.db
+
+  # Optional right now, reserved for follow-up features.
+  documents: Y:\docsorg\documents
+
+ollama:
+  url: http://localhost:11434
+  model: mistral:7b-instruct
+  timeout: 180
+
+retrieval:
+  top_k: 8
