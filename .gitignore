@@ -34,6 +34,13 @@ docorganizer.db-wal
 # ── Config overrides ─────────────────────────────────────────────────────────
 config.local.yaml
 
+# ── Frontend (Node/Vite) ─────────────────────────────────────────────────────
+frontend/node_modules/
+frontend/dist/
+
+# ── Built frontend copied into the backend package (Docker build stage only) ──
+docorg/static/
+
 # ── OS ───────────────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db

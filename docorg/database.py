@@ -50,10 +50,26 @@ CREATE TRIGGER IF NOT EXISTS documents_ad AFTER DELETE ON documents BEGIN
     VALUES ('delete', old.id, old.filename, old.extracted_text);
 END;
 
--- Key/value store for web-configured settings (e.g. AI provider config).
+-- Key/value store for web-configured settings (legacy single AI config; kept
+-- only as a migration source for ai_profiles below).
 CREATE TABLE IF NOT EXISTS app_settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
+);
+
+-- Named, switchable AI provider configs. At most one row has is_active=1;
+-- enforced in application code (set_active_ai_profile), not a DB constraint.
+CREATE TABLE IF NOT EXISTS ai_profiles (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    provider    TEXT NOT NULL DEFAULT 'ollama',
+    model       TEXT NOT NULL DEFAULT '',
+    base_url    TEXT NOT NULL DEFAULT '',
+    api_key     TEXT NOT NULL DEFAULT '',
+    timeout     INTEGER NOT NULL DEFAULT 180,
+    max_tokens  INTEGER NOT NULL DEFAULT 1200,
+    is_active   INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
 );
 """
 
@@ -188,8 +204,14 @@ def search_documents(conn: sqlite3.Connection, query: str) -> list[sqlite3.Row]:
     ).fetchall()
 
 
+#: Whitelisted for interpolation into ORDER BY — never build this from unchecked user input.
+SORT_COLUMNS = {"id", "filename", "detected_date", "category", "classification_source", "filing_status", "created_at"}
+
+
 def list_documents(conn: sqlite3.Connection, *, status: str = "all",
-                   category: str | None = None) -> list[sqlite3.Row]:
+                   category: str | None = None,
+                   date_from: str | None = None, date_to: str | None = None,
+                   sort_by: str = "detected_date", sort_dir: str = "desc") -> list[sqlite3.Row]:
     where_parts: list[str] = []
     params: list[str] = []
 
@@ -201,13 +223,24 @@ def list_documents(conn: sqlite3.Connection, *, status: str = "all",
         where_parts.append("category = ?")
         params.append(category)
 
+    if date_from:
+        where_parts.append("detected_date >= ?")
+        params.append(date_from)
+
+    if date_to:
+        where_parts.append("detected_date <= ?")
+        params.append(date_to)
+
     where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+    sort_column = sort_by if sort_by in SORT_COLUMNS else "detected_date"
+    direction = "ASC" if sort_dir == "asc" else "DESC"
+    # `(col IS NULL)` ascending keeps rows with no value last regardless of direction.
     return conn.execute(
         f"""
         SELECT *
         FROM documents
         {where_sql}
-        ORDER BY skipped DESC, created_at DESC, id DESC
+        ORDER BY ({sort_column} IS NULL), {sort_column} {direction}, id DESC
         """,
         params,
     ).fetchall()
@@ -236,6 +269,77 @@ def set_app_setting(conn: sqlite3.Connection, key: str, value: str) -> None:
     conn.commit()
 
 
+def list_ai_profiles(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM ai_profiles ORDER BY created_at, id"
+    ).fetchall()
+
+
+def get_ai_profile(conn: sqlite3.Connection, profile_id: int) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM ai_profiles WHERE id = ?", (profile_id,)
+    ).fetchone()
+
+
+def get_active_ai_profile(conn: sqlite3.Connection) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM ai_profiles WHERE is_active = 1 LIMIT 1"
+    ).fetchone()
+
+
+def insert_ai_profile(conn: sqlite3.Connection, *, name: str, provider: str, model: str,
+                      base_url: str, api_key: str, timeout: int, max_tokens: int,
+                      is_active: bool = False) -> int:
+    if is_active:
+        conn.execute("UPDATE ai_profiles SET is_active = 0")
+    cur = conn.execute(
+        """
+        INSERT INTO ai_profiles (name, provider, model, base_url, api_key, timeout, max_tokens, is_active)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (name, provider, model, base_url, api_key, timeout, max_tokens, 1 if is_active else 0),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def update_ai_profile(conn: sqlite3.Connection, profile_id: int, *,
+                      name: str | None = None, provider: str | None = None,
+                      model: str | None = None, base_url: str | None = None,
+                      api_key: str | None = None, timeout: int | None = None,
+                      max_tokens: int | None = None) -> None:
+    updates: list[str] = []
+    params: list[object] = []
+    for column, value in (
+        ("name", name), ("provider", provider), ("model", model), ("base_url", base_url),
+        ("api_key", api_key), ("timeout", timeout), ("max_tokens", max_tokens),
+    ):
+        if value is not None:
+            updates.append(f"{column} = ?")
+            params.append(value)
+    if not updates:
+        return
+    params.append(profile_id)
+    conn.execute(f"UPDATE ai_profiles SET {', '.join(updates)} WHERE id = ?", params)
+    conn.commit()
+
+
+def delete_ai_profile(conn: sqlite3.Connection, profile_id: int) -> None:
+    conn.execute("DELETE FROM ai_profiles WHERE id = ?", (profile_id,))
+    conn.commit()
+
+
+def set_active_ai_profile(conn: sqlite3.Connection, profile_id: int) -> None:
+    conn.execute("UPDATE ai_profiles SET is_active = 0")
+    conn.execute("UPDATE ai_profiles SET is_active = 1 WHERE id = ?", (profile_id,))
+    conn.commit()
+
+
+def clear_active_ai_profile(conn: sqlite3.Connection) -> None:
+    conn.execute("UPDATE ai_profiles SET is_active = 0")
+    conn.commit()
+
+
 def list_categories(conn: sqlite3.Connection) -> list[str]:
     """Return all distinct non-null category values stored in the database."""
     rows = conn.execute(
@@ -256,6 +360,7 @@ def update_document_fields(conn: sqlite3.Connection, doc_id: int, *,
                            filing_status: str | None = None,
                            skipped: int | None = None,
                            clear_ai_metadata: bool = False,
+                           clear_category: bool = False,
                            touch_reviewed_at: bool = True) -> None:
     updates: list[str] = []
     params: list[object] = []
@@ -263,7 +368,9 @@ def update_document_fields(conn: sqlite3.Connection, doc_id: int, *,
     if detected_date is not None:
         updates.append("detected_date = ?")
         params.append(detected_date)
-    if category is not None:
+    if clear_category:
+        updates.append("category = NULL")
+    elif category is not None:
         updates.append("category = ?")
         params.append(category)
     if ai_suggested_category is not None:

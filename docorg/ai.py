@@ -23,7 +23,6 @@ PROVIDER_DEFAULTS: dict[str, dict[str, object]] = {
 }
 
 DEFAULT_AI_SETTINGS: dict[str, object] = {
-    "enabled": False,
     "provider": "ollama",
     # Left blank rather than a concrete URL: _call_ollama/_call_openai_compatible fall
     # back to PROVIDER_DEFAULTS[provider] whenever this is empty, so a blank base_url
@@ -36,42 +35,83 @@ DEFAULT_AI_SETTINGS: dict[str, object] = {
     "max_tokens": 1200,
 }
 
-_AI_SETTINGS_KEY = "ai_config"
+# Legacy single-config key (pre-profiles). Only read once, as a migration
+# source, when the ai_profiles table is still empty.
+_LEGACY_AI_SETTINGS_KEY = "ai_config"
 
 
-def load_ai_settings(conn: sqlite3.Connection) -> dict | None:
-    """Return the web-configured AI settings, or None if nothing has been saved yet."""
-    from .database import get_app_setting
+def _migrate_legacy_ai_config(cfg: dict, conn: sqlite3.Connection) -> None:
+    """One-time migration into a profile row: prefers the old single DB config,
+    falls back to config.yaml's ai: block. No-op if neither exists."""
+    from .database import get_app_setting, insert_ai_profile
 
-    raw = get_app_setting(conn, _AI_SETTINGS_KEY)
-    if raw is None:
+    legacy: dict = {}
+    was_active = False
+
+    raw = get_app_setting(conn, _LEGACY_AI_SETTINGS_KEY)
+    if raw:
+        try:
+            stored = json.loads(raw)
+        except json.JSONDecodeError:
+            stored = None
+        if isinstance(stored, dict):
+            legacy = stored
+            was_active = bool(stored.get("enabled", False))
+
+    if not legacy:
+        legacy_cfg = cfg.get("ai", {}) or {}
+        if legacy_cfg:
+            legacy = {
+                "provider": "ollama",
+                "model": legacy_cfg.get("model", DEFAULT_AI_SETTINGS["model"]),
+                "base_url": legacy_cfg.get("ollama_url", ""),
+                "api_key": "",
+                "timeout": legacy_cfg.get("timeout", DEFAULT_AI_SETTINGS["timeout"]),
+                "max_tokens": legacy_cfg.get("max_tokens", DEFAULT_AI_SETTINGS["max_tokens"]),
+            }
+            was_active = bool(legacy_cfg.get("enabled", False))
+
+    if not legacy:
+        return
+
+    insert_ai_profile(
+        conn,
+        name="Default",
+        provider=legacy.get("provider", "ollama"),
+        model=legacy.get("model") or DEFAULT_AI_SETTINGS["model"],
+        base_url=legacy.get("base_url", ""),
+        api_key=legacy.get("api_key", ""),
+        timeout=int(legacy.get("timeout") or DEFAULT_AI_SETTINGS["timeout"]),
+        max_tokens=int(legacy.get("max_tokens") or DEFAULT_AI_SETTINGS["max_tokens"]),
+        is_active=was_active,
+    )
+
+
+def ensure_ai_profiles_seeded(cfg: dict, conn: sqlite3.Connection) -> None:
+    """Migrate the legacy single-config/config.yaml seed into a profile, once,
+    if the ai_profiles table doesn't have any rows yet. No-op otherwise."""
+    from .database import list_ai_profiles
+
+    if not list_ai_profiles(conn):
+        _migrate_legacy_ai_config(cfg, conn)
+
+
+def resolve_ai_config(cfg: dict, conn: sqlite3.Connection) -> dict | None:
+    """Settings for the active AI profile, or None if no profile is active."""
+    from .database import get_active_ai_profile
+
+    ensure_ai_profiles_seeded(cfg, conn)
+    profile = get_active_ai_profile(conn)
+    if profile is None:
         return None
-    try:
-        stored = json.loads(raw)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(stored, dict):
-        return None
-    merged = dict(DEFAULT_AI_SETTINGS)
-    merged.update(stored)
-    return merged
-
-
-def save_ai_settings(conn: sqlite3.Connection, data: dict) -> None:
-    from .database import set_app_setting
-
-    merged = dict(DEFAULT_AI_SETTINGS)
-    merged.update(data)
-    set_app_setting(conn, _AI_SETTINGS_KEY, json.dumps(merged))
-
-
-def resolve_ai_config(cfg: dict, conn: sqlite3.Connection | None = None) -> dict:
-    """Web-configured DB settings take priority; falls back to config.yaml's ai: block."""
-    if conn is not None:
-        db_settings = load_ai_settings(conn)
-        if db_settings is not None:
-            return db_settings
-    return cfg.get("ai", {})
+    return {
+        "provider": profile["provider"],
+        "model": profile["model"],
+        "base_url": profile["base_url"],
+        "api_key": profile["api_key"],
+        "timeout": profile["timeout"],
+        "max_tokens": profile["max_tokens"],
+    }
 
 
 def _repair_truncated_json(text: str) -> str | None:
@@ -263,11 +303,12 @@ def test_provider_connection(ai_cfg: dict) -> tuple[bool, str]:
 
 
 def suggest_date_category(*, text: str, filename: str, categories: list[str], ai_cfg: dict) -> dict | None:
-    """Returns suggestion dict on success, or None. Sets suggest_date_category.last_error on failure."""
+    """Returns suggestion dict on success, or None. Sets suggest_date_category.last_error on failure.
+
+    Callers are responsible for checking there's an AI profile to use at all
+    (e.g. via resolve_ai_config returning non-None) before calling this.
+    """
     suggest_date_category.last_error = ""
-    if not ai_cfg.get("enabled", False):
-        suggest_date_category.last_error = "ai.enabled is false in config"
-        return None
 
     prompt = (
         "Extract the most likely document date and category from this document text. "

@@ -1,6 +1,8 @@
 # docorganizer
 
-A self-hosted web app that ingests scanned PDF documents, extracts their text, organises them into a `documents/YYYY/MM/<category>/` folder hierarchy, and stores everything in a searchable local SQLite database. Everything happens in the browser — there is no CLI. A single Docker container serves the web UI, watches a mounted inbox folder for new scans, and accepts direct uploads.
+A self-hosted web app that ingests scanned PDF documents, extracts their text, organises them into a `documents/YYYY/MM/<category>/` folder hierarchy, and stores everything in a searchable local SQLite database. Everything happens in the browser — there is no CLI. A single Docker container serves the UI, watches a mounted inbox folder for new scans, and accepts direct uploads.
+
+The backend (`docorg/`, FastAPI) is a JSON API; the UI (`frontend/`) is a React + TypeScript single-page app built with Vite and served by the same container as static assets.
 
 ---
 
@@ -21,33 +23,44 @@ Either way, new documents are deduplicated (SHA-256), dated, categorised via the
 
 ## What the web UI does
 
-- **Browse & search** — full-text search (SQLite FTS5) across all indexed documents, with status/category filters.
-- **Upload** — add PDFs directly from the browser; they're processed immediately, the same way a dropped file in `scans/` is.
+- **Browse & search** — full-text search (SQLite FTS5) across all indexed documents, with status/category filters and date-range presets (last 7/30/90 days, this year, last year, or a custom range).
+- **Upload** — drag-and-drop or pick multiple PDFs at once, each with its own live progress bar; they're processed immediately, the same way a dropped file in `scans/` is.
+- **Multi-select + bulk Ask AI** — select several documents from the browse table and run them through AI together; suggestions stream in per-document as they're ready, with per-item or "apply all ready" actions.
 - **Document detail page** — edit the detected date/category, **Ask AI** for a suggestion (preview it, then Apply), re-file to the correct folder, mark as skipped, or delete the database row (this does not delete the PDF from disk).
-- **AI Settings page** — configure the provider used by "Ask AI": local **Ollama**, **OpenRouter**, or **NVIDIA** (build.nvidia.com), with a "Test connection" button. Multiple comma-separated API keys rotate automatically on rate limits (HTTP 429).
+- **AI Settings page** — save multiple named AI provider configs (e.g. "Local Ollama", "NVIDIA free") — local **Ollama**, **OpenRouter**, **NVIDIA**, **Mistral**, **DeepSeek**, **Google Gemini**, **Poe**, or any other **custom OpenAI-compatible endpoint** (self-hosted LiteLLM/vLLM/llama.cpp/LM Studio, etc.) — each remembering its own model and API key, and switch which one is active with one click via "Activate". "Test connection" checks a config before or after saving it. Multiple comma-separated API keys within a config rotate automatically on rate limits (HTTP 429).
 - **Categories page** — add/remove the categories used by classification rules.
 
 ---
 
-## Running without Docker (development)
+## Local development (without Docker)
+
+The backend (JSON API) and frontend (React SPA) run as two separate processes in development — the frontend's dev server proxies `/api` requests to the backend, so there's no CORS setup needed.
+
+**Backend:**
 
 ```sh
 python -m venv .venv
 .venv\Scripts\activate        # Windows
 # source .venv/bin/activate   # macOS / Linux
 pip install -e .
+docorg                        # DOCORG_CONFIG=config.yaml, DOCORG_HOST=0.0.0.0, DOCORG_PORT=8000
 ```
+
+Override with env vars as needed, e.g. `DOCORG_CONFIG=config.yaml DOCORG_HOST=127.0.0.1 DOCORG_PORT=8000 docorg` (`docorg` is a thin wrapper around `python -m docorg`).
 
 > **OCR support**: `pip install -e ".[ocr]"` — also requires Tesseract installed on the system. When a PDF page has no selectable text, docorganizer automatically falls back to OCR for that page.
 
-Then start the server (env vars, since there's no CLI to pass flags to):
+**Frontend** (in a second terminal):
 
 ```sh
-docorg                                                     # DOCORG_CONFIG=config.yaml, DOCORG_HOST=0.0.0.0, DOCORG_PORT=8000
-DOCORG_CONFIG=config.yaml DOCORG_HOST=127.0.0.1 DOCORG_PORT=8080 docorg
+cd frontend
+npm install
+npm run dev
 ```
 
-`docorg` is a thin wrapper around `python -m docorg`.
+Open `http://localhost:5173` — this is the dev UI, hot-reloading, proxying API calls to the backend on port 8000 (see `frontend/vite.config.ts`).
+
+**Building for production** (what the Docker image does): `cd frontend && npm run build` produces `frontend/dist/`, which gets copied to `docorg/static/` and served by the backend directly — at that point there's just one process/port again, same as the Docker deployment.
 
 ---
 
@@ -120,9 +133,10 @@ rules:
     filename_keywords: [school]
     priority: 10
 
-# Optional first-run seed for the AI Settings page (Ollama/OpenRouter/NVIDIA).
-# Once saved from the browser, settings live in the database and this block
-# is no longer read.
+# Optional first-run seed: migrated into a "Default" AI config the first time
+# the AI Settings page is opened on a database with none saved yet. After
+# that, configs live in the database (see AI Settings in the browser) and
+# this block is no longer read.
 ai:
   enabled: false
   model: mistral:7b-instruct

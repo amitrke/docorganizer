@@ -1,3 +1,12 @@
+FROM node:20-slim AS frontend-build
+
+WORKDIR /frontend
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build
+
+
 FROM python:3.12-slim
 
 WORKDIR /app
@@ -5,6 +14,7 @@ WORKDIR /app
 # Web UI + upload + inbox watcher are all core deps now (no GPU, no OCR needed on NAS)
 COPY pyproject.toml README.md ./
 COPY docorg/ ./docorg/
+COPY --from=frontend-build /frontend/dist ./docorg/static
 
 RUN pip install --no-cache-dir -e .
 
