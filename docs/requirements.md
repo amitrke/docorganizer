@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-A Python-based desktop/CLI tool that ingests scanned PDF documents, extracts their text content, organizes them into a date- and category-based folder hierarchy, and stores them in a searchable local database.
+A self-hosted Python web app (FastAPI, server-rendered — no separate frontend build) that ingests scanned PDF documents, extracts their text content, organizes them into a date- and category-based folder hierarchy, and stores them in a searchable local database. Runs as a single Docker container: it serves the browser UI, watches a mounted inbox folder for new scans in the background, and accepts direct uploads. There is no CLI.
 
 ---
 
@@ -11,7 +11,7 @@ A Python-based desktop/CLI tool that ingests scanned PDF documents, extracts the
 - Automatically organize scanned PDFs into `YYYY/MM` folder structures, with optional category subfolders.
 - Extract and index text from PDFs for fast keyword search.
 - Handle PDFs that are not machine-readable via OCR fallback.
-- Provide a foundation for a future web-based UI.
+- Provide a browser-based UI for browsing, uploading, correcting, and re-filing documents — no CLI required.
 - Support configurable document categories and keyword-based category mapping rules.
 
 ---
@@ -22,7 +22,8 @@ A Python-based desktop/CLI tool that ingests scanned PDF documents, extracts the
 
 | ID | Requirement |
 |----|-------------|
-| F1 | The system shall monitor a designated input folder (e.g., `scans/`) for new PDF files. |
+| F1 | The system shall monitor a designated input folder (e.g., `scans/`) for new PDF files, running as a background task inside the web server process (no separate watcher process). |
+| F1a | The system shall also accept PDF uploads directly from the browser UI, processed through the same pipeline as watched-folder files. |
 | F2 | The system shall pick up and process each new PDF automatically. |
 | F3 | After processing, the system shall move each PDF to its target folder: `documents/YYYY/MM/` when no category is detected, or `documents/YYYY/MM/<category>/` when a category is detected. |
 
@@ -60,52 +61,48 @@ A Python-based desktop/CLI tool that ingests scanned PDF documents, extracts the
 | F14 | The system shall use a local SQLite database for storage (no external services required). |
 | F15 | The database shall use FTS5 (Full-Text Search) for keyword search capability. |
 | F16 | Each document record shall contain: `id`, `filename`, `filepath`, `extracted_text`, `detected_date`, `category`, `classification_source`, `filing_status`, `last_reviewed_at`, `skipped`, `created_at`. |
-| F17 | The system shall support basic keyword search via a CLI interface. |
+| F17 | The system shall support keyword search via the browser UI's search box. |
 
 ### 3.6 Category Management and Mapping
 
 | ID | Requirement |
 |----|-------------|
 | F18 | The system shall support a configurable list of categories (e.g., `health`, `tax`, `education`) stored in a local config file. |
-| F19 | The system shall provide a CLI command to add, list, and remove categories manually. |
+| F19 | The system shall provide a browser page to add, list, and remove categories manually (mapping rules themselves remain config-file-edited). |
 | F20 | The system shall support rule-based category mapping where each rule consists of: one or more keywords/phrases, a target category, and a numeric priority (lower number = higher priority). |
 | F21 | During processing, the system shall evaluate both the extracted text and the filename against all category mapping rules to infer a category. |
 | F22 | If multiple mapping rules match, the system shall select the rule with the lowest numeric priority value and record the matched rule context. |
 | F23 | If no mapping rule matches, the document shall be stored without a category folder (date-only path). |
 
-### 3.7 Interactive Ingestion Mode
+### 3.7 Ingestion Mode
 
 | ID | Requirement |
 |----|-------------|
-| F24 | The system shall support a `--mode` flag with two values: `auto` (default) and `interactive`. |
-| F25 | In `auto` mode, the system shall silently process each file using detected values with no user input required. This is the default mode for the folder watcher. |
-| F26 | In `interactive` mode, ingestion shall pause after each file is analysed and present the same per-file TUI action screen used by `docorg review` (File as-is / Edit date / Edit category / Ask AI / Skip), giving the user an opportunity to correct values before the file is filed. |
-| F27 | If the user chooses **Skip** during interactive ingestion, the file shall remain in the inbox and appear in `docorg review` with a `skipped` flag. |
-| F28 | Interactive mode shall be the recommended default when processing files manually or on-demand. |
+| F24 | The system shall process every incoming PDF (watched-folder or uploaded) automatically and immediately, using detected values with no ingestion-time gate. There is no separate "interactive ingestion" mode — correction happens afterward on the document's detail page (see 3.8). |
+| F27 | A document can be marked skipped from its detail page after filing; skipped documents retain a `skipped` flag and are surfaced first in the browse list. |
 
-### 3.8 Review Menu (CLI/TUI)
+### 3.8 Review & Correction (Browser)
 
 | ID | Requirement |
 |----|-------------|
-| F30 | The system shall provide a terminal review workflow invoked via `docorg review` that lists **all** documents known to the system — both pending inbox files and previously filed documents. |
-| F31 | The review output shall display each entry with: filename, current date, current category, classification source (`rules` / `ai` / `manual`), and filing status (`pending` / `filed`). |
-| F32 | For each selected file, the review workflow shall offer: **File as-is**, **Edit date**, **Edit category**, **Ask AI**, **Re-file**, and **Skip** (via command actions or interactive mode). |
+| F30 | The system shall provide a browse page listing **all** documents known to the system — both pending inbox files and previously filed documents — with search and status/category filters. |
+| F31 | The list and document detail page shall display: filename, current date, current category, classification source (`rules` / `ai` / `manual`), and filing status (`pending` / `filed`). |
+| F32 | From a document's detail page, the system shall offer: **edit date**, **edit category**, **Ask AI**, **Re-file**, **mark skipped**, and **delete** (database row only, not the PDF on disk). |
 | F33 | The **Re-file** action shall move a previously filed document to the corrected `YYYY/MM/<category>/` path and update the database record accordingly, including a `last_reviewed_at` timestamp. |
-| F34 | The **Ask AI** action shall invoke a local lightweight AI model to suggest date and/or category values; it is available for any document regardless of its current confidence level. |
-| F35 | The AI suggestion shall be shown as a proposed value with a brief rationale; the user must explicitly confirm or reject it before it is applied. |
-| F36 | The TUI shall support filtering the list by status (`pending`, `filed`, `all`) and by category, to help the user focus the review. |
-| F37 | The TUI shall allow bulk-confirm for a filtered subset (e.g., all `filed` documents with `rules` source and high confidence) so the user is not forced to step through every record individually. |
-| F38 | Files skipped in the TUI shall retain a `skipped` flag and reappear at the top of the next `docorg review` run. |}
+| F34 | The **Ask AI** action shall invoke the configured AI provider (see 3.9) to suggest date and/or category values; it is available for any document regardless of its current confidence level. |
+| F35 | The AI suggestion shall be shown as a proposed value with a brief rationale; the user must explicitly click Apply before it is persisted. |
+| F36 | The browse page shall support filtering the list by status (`pending`, `filed`, `all`) and by category. |
+| F38 | Documents marked skipped shall retain a `skipped` flag and be surfaced first in the browse list until resolved. |
 
 ### 3.9 AI-Assisted Classification
 
 | ID | Requirement |
 |----|-------------|
-| F39 | The system shall support an optional local AI model for category and date suggestion, enabled via config flag; it shall not be required for normal operation. |
-| F40 | The AI model shall operate entirely offline via a local Ollama endpoint; no network calls to external services shall be made. |
-| F41 | The default AI model shall be `mistral:7b-instruct` (Q4), suitable for systems with a dedicated GPU (e.g., RTX 3080); it shall handle date and category extraction in a single prompt pass. Documents are expected to be in English; the prompt shall be tuned accordingly. |
-| F42 | The config file shall expose an `ai_model` setting so the user can switch to a lighter alternative (e.g., `llama3.2:3b`, `phi3:mini`) without code changes, for systems with less VRAM or CPU-only inference. |
-| F43 | AI classification shall only be invoked on demand (via the **Ask AI** TUI action or `--ai` CLI flag); it shall never run automatically without user intent. |
+| F39 | The system shall support an optional AI provider for category and date suggestion, configured from the browser's Settings page; it shall not be required for normal operation. |
+| F40 | The system shall support a local Ollama endpoint (fully offline, no external network calls) as well as hosted providers — OpenRouter and NVIDIA (build.nvidia.com) — selected per-deployment via the Settings page. |
+| F41 | The default local model is `mistral:7b-instruct` (Q4), suitable for systems with a dedicated GPU (e.g., RTX 3080); it shall handle date and category extraction in a single prompt pass. Documents are expected to be in English; the prompt shall be tuned accordingly. |
+| F42 | The Settings page shall expose a `model` field so the user can switch models (local or hosted) without code changes. |
+| F43 | AI classification shall only be invoked on demand (via the detail page's **Ask AI** action); it shall never run automatically without user intent. |
 | F44 | The system shall log whether a filed document's category/date was set by rules, by AI suggestion, or manually, and store this as `classification_source` in the database. |
 
 ---
@@ -114,13 +111,13 @@ A Python-based desktop/CLI tool that ingests scanned PDF documents, extracts the
 
 | ID | Requirement |
 |----|-------------|
-| NF1 | The system shall run on Python 3.x with no mandatory cloud or external service dependencies. |
+| NF1 | The system shall run on Python 3.x; cloud dependencies are opt-in only (hosted AI providers), never required for core ingestion/browse/search. |
 | NF2 | Text extraction and OCR shall complete within a reasonable time for typical single-page to 20-page documents. |
 | NF3 | The system shall not duplicate records if a file has already been processed. |
 | NF4 | Date detection accuracy of 60–70% on real-world documents is acceptable for v1. |
 | NF5 | Category mapping shall be configurable without code changes, using local config updates only. |
-| NF6 | The TUI shall be keyboard-navigable and must not require a mouse or graphical display. |
-| NF7 | The default AI model (`mistral:7b-instruct` Q4 via Ollama) shall respond within a few seconds on a GPU with ≥6GB VRAM; lighter models shall be selectable via config for CPU-only or lower-VRAM machines. |
+| NF6 | The browser UI shall be usable with only a keyboard where practical, and must not require a native desktop client. |
+| NF7 | The default local AI model (`mistral:7b-instruct` Q4 via Ollama) shall respond within a few seconds on a GPU with ≥6GB VRAM; hosted providers (OpenRouter, NVIDIA) are selectable via the Settings page for systems without a local GPU. |
 
 ---
 
@@ -133,20 +130,18 @@ A Python-based desktop/CLI tool that ingests scanned PDF documents, extracts the
 | OCR fallback | Tesseract via pytesseract |
 | Database | SQLite with FTS5 |
 | File operations | `shutil`, `pathlib` |
-| TUI menu | `questionary` or `textual` |
-| AI classification (optional) | Ollama (`mistral:7b-instruct` Q4 default; configurable for lighter models e.g. `llama3.2:3b`, `phi3:mini`) |
-| Future backend | FastAPI |
-| Future frontend | React |
+| Web backend + UI | FastAPI, server-rendered HTML (no separate frontend build) |
+| Inbox watching | `watchdog`, run as a background task inside the web server process |
+| AI classification (optional) | Ollama (local, default `mistral:7b-instruct`), or OpenRouter / NVIDIA (hosted, OpenAI-compatible) — selected from the Settings page |
 
 ---
 
 ## 6. Out of Scope (v1)
 
-- Web UI or API layer.
 - Elasticsearch or MongoDB integration.
 - Advanced NLP-based date extraction.
-- Cloud storage or sync.
-- Multi-user support.
+- Cloud storage or sync of the document archive itself.
+- Multi-user support / authentication.
 
 ---
 
@@ -154,18 +149,18 @@ A Python-based desktop/CLI tool that ingests scanned PDF documents, extracts the
 
 | Phase | Deliverable |
 |-------|-------------|
-| Phase 1 | File watcher → text extraction → SQLite storage → folder move |
+| Phase 1 | Background inbox watcher → text extraction → SQLite storage → folder move |
 | Phase 2 | OCR fallback for non-searchable PDFs |
 | Phase 3 | Date detection via regex and keyword heuristics |
 | Phase 4 | Category management + mapping rules + category-aware filing |
-| Phase 5 | Interactive ingestion mode (`--mode interactive`) reusing TUI per-file action screen |
-| Phase 6 | TUI review menu (`docorg review`) with per-file actions |
-| Phase 7 | AI-assisted classification (on-demand, local model, opt-in) |
-| Phase 8 | CLI search tool using SQLite FTS5 |
-| Phase 9 | FastAPI backend + React UI (future) |
+| Phase 5 | Browser upload as a second ingestion path alongside the watched folder |
+| Phase 6 | Browser review workflow (edit date/category, re-file, skip, delete) on the document detail page |
+| Phase 7 | AI-assisted classification (on-demand, Settings-page-configured provider, opt-in) |
+| Phase 8 | Full-text search via SQLite FTS5, exposed in the browse page |
+| Phase 9 | FastAPI browser UI as the sole interface (CLI removed) |
 
 ---
 
 ## 8. Success Criteria (v1)
 
-> Drop a PDF into the `scans/` folder -> it is moved to the correct `documents/YYYY/MM/` or `documents/YYYY/MM/<category>/` folder and its text becomes searchable via CLI. For documents where detection is uncertain, `docorg review` presents a menu to resolve them manually or with an AI suggestion.
+> Drop a PDF into the `scans/` folder, or upload it from the browser -> it is moved to the correct `documents/YYYY/MM/` or `documents/YYYY/MM/<category>/` folder and its text becomes searchable from the browse page. For documents where detection is uncertain, the document's detail page lets the user correct the date/category manually or with an AI suggestion.

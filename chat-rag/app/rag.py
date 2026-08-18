@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import date
 from datetime import timedelta
 from urllib import request
+
+from .settings import Settings
+from .query_parser import parse_question, build_structured_query, execute_structured_query
 
 
 @dataclass
@@ -21,11 +23,6 @@ class RetrievedDoc:
     score: float | None = None
 
 
-def get_env(name: str, default: str) -> str:
-    value = os.getenv(name, default).strip()
-    return value if value else default
-
-
 def _build_retrieval_query(question: str) -> str:
     # Keep only useful alphanumeric tokens for FTS MATCH query.
     tokens = re.findall(r"[A-Za-z0-9]{2,}", question.lower())
@@ -36,8 +33,12 @@ def _build_retrieval_query(question: str) -> str:
         "the", "and", "for", "with", "from", "that", "this", "have", "has", "had",
         "into", "what", "when", "where", "which", "about", "give", "list", "last",
         "years", "year", "show", "tell", "all", "are", "was", "were", "can", "you",
+        "do", "any", "i", "prior", "to",
     }
     filtered = [tok for tok in tokens if tok not in stopwords]
+    # Also filter out bare year numbers (4-digit numbers) to avoid biasing retrieval
+    # towards documents that mention that specific year in queries like "prior to 2022".
+    filtered = [tok for tok in filtered if not (len(tok) == 4 and tok.isdigit())]
     terms = filtered if filtered else tokens
 
     # OR across terms to improve recall, cap to avoid huge queries.
@@ -75,6 +76,20 @@ def _is_place_history_question(question: str) -> bool:
         r"where\s+have\s+i\s+lived",
         r"address(?:es)?\s+i\s+have\s+lived",
         r"residen(?:ce|tial)\s+history",
+    ]
+    return any(re.search(p, q) for p in patterns)
+
+
+def _is_date_range_question(question: str) -> bool:
+    """Detect questions about documents from a specific year/date range."""
+    q = question.lower()
+    patterns = [
+        r"from\s+prior\s+to\s+\d{4}",
+        r"before\s+\d{4}",
+        r"prior\s+to\s+\d{4}",
+        r"from\s+\d{4}",
+        r"in\s+\d{4}",
+        r"from\s+\d{4}\s+to\s+\d{4}",
     ]
     return any(re.search(p, q) for p in patterns)
 
@@ -145,7 +160,7 @@ def _build_context(docs: list[RetrievedDoc], per_doc_chars: int = 2200) -> str:
     return "\n\n".join(blocks)
 
 
-def _build_prompt(question: str, context: str, place_history_mode: bool) -> str:
+def _build_prompt(question: str, context: str, place_history_mode: bool, date_range_mode: bool = False) -> str:
     if place_history_mode:
         return (
             "You are an assistant for personal document intelligence. "
@@ -159,6 +174,19 @@ def _build_prompt(question: str, context: str, place_history_mode: bool) -> str:
             "1) Bullet list of places lived\n"
             "2) Brief evidence line per place with [DOC id]\n"
             "3) Confidence note\n"
+        )
+
+    if date_range_mode:
+        return (
+            "You are an assistant for personal document intelligence. "
+            "This question asks about documents from a specific date or date range. "
+            "Carefully examine each document's detected_date field in the context. "
+            "Answer YES or NO directly, then list the matching documents with their detected dates and filenames. "
+            "Cite document IDs like [DOC 12]. Do not invent dates.\n\n"
+            f"Question:\n{question}\n\n"
+            "Context:\n"
+            f"{context}\n\n"
+            "Your response should start with YES or NO, followed by the evidence.\n"
         )
 
     return (
@@ -194,32 +222,82 @@ def _call_ollama(ollama_url: str, model: str, prompt: str, timeout: int) -> str:
     return str(body.get("response", "")).strip()
 
 
-def answer_question(question: str, top_k_override: int | None = None) -> tuple[str, str, int, list[RetrievedDoc]]:
-    db_path = get_env("DOCORG_DB_PATH", "/data/docorganizer.db")
-    ollama_url = get_env("OLLAMA_URL", "http://ollama:11434")
-    model = get_env("OLLAMA_MODEL", "mistral:7b-instruct")
-    timeout = int(get_env("OLLAMA_TIMEOUT", "180"))
-    default_top_k = int(get_env("TOP_K", "8"))
+def answer_question(
+    question: str,
+    settings: Settings,
+    top_k_override: int | None = None,
+) -> tuple[str, str, int, list[RetrievedDoc]]:
+    db_path = settings.db_path
+    ollama_url = settings.ollama_url
+    model = settings.ollama_model
+    timeout = settings.ollama_timeout
+    default_top_k = settings.top_k
     top_k = top_k_override if top_k_override is not None else default_top_k
 
-    retrieval_query = _build_retrieval_query(question)
-    docs = _retrieve_docs(db_path, retrieval_query, top_k)
+    # First, try structured parsing (regex, then LLM fallback)
+    parsed = parse_question(
+        question,
+        db_path,
+        ollama_url=ollama_url,
+        ollama_model=model,
+        ollama_timeout=timeout,
+    )
+    retrieval_query = ""
+    docs: list[RetrievedDoc] = []
 
-    year_window = _looks_like_year_window_question(question)
-    place_history_mode = _is_place_history_question(question)
-    if year_window and place_history_mode:
-        docs = _filter_docs_for_year_window(docs, year_window)
+    if parsed.is_structured:
+        # Use structured query for questions with multiple clear filters
+        where_clause, params = build_structured_query(parsed, limit=top_k)
+        rows = execute_structured_query(db_path, where_clause, params)
+        docs = [
+            RetrievedDoc(
+                id=row["id"],
+                filename=row["filename"],
+                filepath=row["filepath"],
+                detected_date=row["detected_date"],
+                category=row["category"],
+                extracted_text=row["extracted_text"] or "",
+            )
+            for row in rows
+        ]
+        retrieval_query = f"{'LLM-translated' if parsed.via_llm else 'Structured'} query: categories={parsed.categories}, date_from={parsed.date_from}, date_to={parsed.date_to}, names={parsed.names}"
+    else:
+        # Fall back to FTS for open-ended or unstructured questions
+        retrieval_query = _build_retrieval_query(question)
+        docs = _retrieve_docs(db_path, retrieval_query, top_k)
+
+        year_window = _looks_like_year_window_question(question)
+        place_history_mode = _is_place_history_question(question)
+        date_range_mode = _is_date_range_question(question)
+        
+        if year_window and place_history_mode:
+            docs = _filter_docs_for_year_window(docs, year_window)
 
     if not docs:
         return (
-            "I could not find relevant documents in the index for this question.",
+            "I could not find relevant documents matching those criteria.",
             retrieval_query,
             top_k,
             [],
         )
 
     context = _build_context(docs)
-    prompt = _build_prompt(question, context, place_history_mode)
+    
+    # Adjust prompt based on whether we used structured or unstructured retrieval
+    if parsed.is_structured:
+        prompt = (
+            "You are an assistant for personal document intelligence. "
+            "The following documents were retrieved using structured filters (category, date range, names). "
+            "Format your answer clearly, listing each matching document with its date and category. "
+            "Cite document IDs like [DOC 12].\n\n"
+            f"Question:\n{question}\n\n"
+            "Documents found:\n"
+            f"{context}\n"
+        )
+    else:
+        place_history_mode = _is_place_history_question(question)
+        date_range_mode = _is_date_range_question(question)
+        prompt = _build_prompt(question, context, place_history_mode, date_range_mode)
 
     try:
         answer = _call_ollama(ollama_url, model, prompt, timeout)

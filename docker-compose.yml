@@ -14,11 +14,13 @@ services:
       # Database — single file, mounted read-write so SQLite WAL files can be created
       - /volume1/docorganizer/docorganizer.db:/data/docorganizer.db
 
-      # Inbox — where new scans land (read-only for the web UI)
-      - /volume1/docorganizer/scans:/data/scans:ro
+      # Inbox — where new scans land. Read-write: the in-process watcher and
+      # browser uploads both write here, and the watcher removes files once filed.
+      - /volume1/docorganizer/scans:/data/scans
 
-      # Filed documents — the browsable archive (read-only for the web UI)
-      - /volume1/docorganizer/documents:/data/documents:ro
+      # Filed documents — the browsable archive. Read-write: the "Re-file" and
+      # "Apply AI suggestion" actions in the browser move files within this tree.
+      - /volume1/docorganizer/documents:/data/documents
     environment:
       - PYTHONUNBUFFERED=1
     # Optional: run as a non-root user matching your Synology file ownership

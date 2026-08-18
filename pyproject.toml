@@ -9,8 +9,10 @@ requires-python = ">=3.10"
 dependencies = [
     "pymupdf>=1.24",
     "watchdog>=4.0",
-    "click>=8.1",
     "pyyaml>=6.0",
+    "fastapi>=0.111",
+    "uvicorn>=0.30",
+    "python-multipart>=0.0.9",
 ]
 
 [project.optional-dependencies]
@@ -18,16 +20,9 @@ ocr = [
     "pytesseract>=0.3",
     "Pillow>=10.0",
 ]
-tui = [
-    "textual>=0.60",
-]
-web = [
-    "fastapi>=0.111",
-    "uvicorn>=0.30",
-]
 
 [project.scripts]
-docorg = "docorg.cli:main"
+docorg = "docorg.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

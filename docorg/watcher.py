@@ -68,7 +68,8 @@ class _PDFHandler(FileSystemEventHandler):
             print(f"[duplicate] {result['path']} — already in database, skipped.")
 
 
-def start_watcher(cfg: dict) -> None:
+def start_observer(cfg: dict) -> Observer:
+    """Start a background inbox watcher. Caller is responsible for stop()/join() on shutdown."""
     inbox = cfg["paths"]["inbox"]
     Path(inbox).mkdir(parents=True, exist_ok=True)
 
@@ -77,10 +78,5 @@ def start_watcher(cfg: dict) -> None:
     observer.schedule(handler, path=inbox, recursive=False)
     observer.start()
 
-    print(f"Watching {inbox}  (Ctrl+C to stop)")
-    try:
-        while observer.is_alive():
-            observer.join(timeout=1)
-    except KeyboardInterrupt:
-        observer.stop()
-    observer.join()
+    print(f"Watching {inbox}")
+    return observer

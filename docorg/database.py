@@ -49,6 +49,12 @@ CREATE TRIGGER IF NOT EXISTS documents_ad AFTER DELETE ON documents BEGIN
     INSERT INTO documents_fts(documents_fts, rowid, filename, extracted_text)
     VALUES ('delete', old.id, old.filename, old.extracted_text);
 END;
+
+-- Key/value store for web-configured settings (e.g. AI provider config).
+CREATE TABLE IF NOT EXISTS app_settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 
@@ -212,6 +218,22 @@ def get_document_by_id(conn: sqlite3.Connection, doc_id: int) -> sqlite3.Row | N
         "SELECT * FROM documents WHERE id = ?",
         (doc_id,),
     ).fetchone()
+
+
+def get_app_setting(conn: sqlite3.Connection, key: str) -> str | None:
+    row = conn.execute("SELECT value FROM app_settings WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def set_app_setting(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute(
+        """
+        INSERT INTO app_settings (key, value) VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """,
+        (key, value),
+    )
+    conn.commit()
 
 
 def list_categories(conn: sqlite3.Connection) -> list[str]:
