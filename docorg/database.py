@@ -99,7 +99,12 @@ CREATE TABLE IF NOT EXISTS ai_profiles (
 def get_connection(db_path: str | Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    # NOT WAL: this DB is typically shared over SMB/CIFS between a NAS container and
+    # a desktop client. WAL relies on shared-memory (mmap) locking that most network
+    # filesystems don't implement correctly, which SQLite's own docs call out as a
+    # real corruption risk for exactly this multi-host setup. TRUNCATE is the classic
+    # rollback-journal mode — safe over a network share, just slightly slower per write.
+    conn.execute("PRAGMA journal_mode=TRUNCATE")
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
