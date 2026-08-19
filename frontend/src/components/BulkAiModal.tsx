@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { applyAi, bulkAskAi, type AiSuggestion } from '../api/client'
+import { applyAi, bulkAskAi, commonFieldEntries, type AiSuggestion } from '../api/client'
 
 interface ItemState {
   status: 'pending' | 'suggested' | 'error' | 'applied' | 'applying'
@@ -77,6 +77,13 @@ export function BulkAiModal({
                       </p>
                       {s.rationale && <p>{s.rationale}</p>}
                       {s.summary && <p>{s.summary}</p>}
+                      {commonFieldEntries(s).length > 0 && (
+                        <dl className="field-grid">
+                          {commonFieldEntries(s).map(([k, v]) => (
+                            <div key={k}><dt>{k}</dt><dd>{v}</dd></div>
+                          ))}
+                        </dl>
+                      )}
                       {Object.keys(s.fields).length > 0 && (
                         <dl className="field-grid">
                           {Object.entries(s.fields).map(([k, v]) => (

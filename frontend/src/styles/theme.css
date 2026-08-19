@@ -144,6 +144,39 @@ body {
   flex-wrap: wrap;
   margin-top: 14px;
 }
+.more-filters-panel {
+  margin-top: 14px;
+  padding: 16px 18px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: oklch(0.98 0.002 260);
+}
+.filter-group + .filter-group {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line-soft);
+}
+.filter-group-label {
+  display: block;
+  color: var(--ink-soft);
+  margin-bottom: 8px;
+  font-size: 0.76rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.filter-group-row {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  align-items: flex-end;
+}
+.filter-group-row > * {
+  flex: 1 1 150px;
+}
+.filter-group .preset-row {
+  margin-top: 10px;
+}
 
 input,
 select,
@@ -263,6 +296,47 @@ td {
 .checkbox-col {
   width: 32px;
 }
+.thumb-col {
+  width: 44px;
+}
+.doc-thumb {
+  width: 32px;
+  height: 42px;
+  object-fit: cover;
+  border-radius: 3px;
+  border: 1px solid var(--line-soft);
+  display: block;
+  background: oklch(0.97 0.002 260);
+}
+.thumb-preview {
+  position: fixed;
+  z-index: 60;
+  padding: 6px;
+  background: #fff;
+  border-radius: var(--radius-control);
+  border: 1px solid var(--line-soft);
+  box-shadow: var(--shadow-modal);
+  pointer-events: none;
+}
+.thumb-preview img {
+  display: block;
+  max-width: 240px;
+  max-height: 328px;
+  border-radius: 3px;
+}
+.detail-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+}
+.doc-thumb-large {
+  width: 90px;
+  height: 120px;
+  object-fit: cover;
+  border-radius: var(--radius-control);
+  border: 1px solid var(--line-soft);
+  flex-shrink: 0;
+}
 .empty {
   padding: 22px;
   border: 1px dashed var(--line);
@@ -307,6 +381,10 @@ td {
 .st-skipped {
   background: var(--line-soft);
   color: var(--ink-soft);
+}
+.st-archived {
+  background: oklch(0.92 0.04 300);
+  color: oklch(0.42 0.09 300);
 }
 .st-other {
   background: var(--line-soft);

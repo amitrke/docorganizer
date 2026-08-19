@@ -11,6 +11,15 @@ export interface Document {
   ai_rationale: string | null
   ai_summary: string | null
   extracted_fields: Record<string, string>
+  primary_person: string | null
+  issuing_organization: string | null
+  reference_number: string | null
+  amount: string | null
+  effective_date: string | null
+  expiry_date: string | null
+  archived_at: string | null
+  archived_reason: string | null
+  archived: boolean
   filing_status: string
   last_reviewed_at: string | null
   skipped: boolean
@@ -32,11 +41,34 @@ export interface AiSuggestion {
   rationale: string
   summary: string
   fields: Record<string, string>
+  primary_person: string | null
+  issuing_organization: string | null
+  reference_number: string | null
+  amount: string | null
+  effective_date: string | null
+  expiry_date: string | null
 }
 
 export interface AskAiResponse {
   suggestion: AiSuggestion | null
   error: string | null
+}
+
+const COMMON_FIELD_LABELS: [key: keyof AiSuggestion, label: string][] = [
+  ['primary_person', 'Primary person'],
+  ['issuing_organization', 'Issuing organization'],
+  ['reference_number', 'Reference number'],
+  ['amount', 'Amount'],
+  ['effective_date', 'Effective date'],
+  ['expiry_date', 'Expiry date'],
+]
+
+export function commonFieldEntries(source: Pick<AiSuggestion,
+  'primary_person' | 'issuing_organization' | 'reference_number' | 'amount' | 'effective_date' | 'expiry_date'
+>): [string, string][] {
+  return COMMON_FIELD_LABELS
+    .map(([key, label]) => [label, source[key]] as [string, string | null])
+    .filter((pair): pair is [string, string] => Boolean(pair[1]))
 }
 
 export interface UploadResult {
@@ -142,6 +174,13 @@ export interface DocumentListParams {
   category?: string
   date_from?: string
   date_to?: string
+  expiry_from?: string
+  expiry_to?: string
+  amount_min?: number
+  amount_max?: number
+  person?: string
+  organization?: string
+  reference_number?: string
   sort_by?: string
   sort_dir?: 'asc' | 'desc'
   page?: number
@@ -154,6 +193,13 @@ export function listDocuments(params: DocumentListParams): Promise<DocumentListR
   if (params.category) search.set('category', params.category)
   if (params.date_from) search.set('date_from', params.date_from)
   if (params.date_to) search.set('date_to', params.date_to)
+  if (params.expiry_from) search.set('expiry_from', params.expiry_from)
+  if (params.expiry_to) search.set('expiry_to', params.expiry_to)
+  if (params.amount_min !== undefined) search.set('amount_min', String(params.amount_min))
+  if (params.person) search.set('person', params.person)
+  if (params.organization) search.set('organization', params.organization)
+  if (params.reference_number) search.set('reference_number', params.reference_number)
+  if (params.amount_max !== undefined) search.set('amount_max', String(params.amount_max))
   if (params.sort_by) search.set('sort_by', params.sort_by)
   if (params.sort_dir) search.set('sort_dir', params.sort_dir)
   search.set('page', String(params.page ?? 1))
@@ -181,6 +227,12 @@ export function applyAi(id: number, suggestion: AiSuggestion): Promise<Document>
       rationale: suggestion.rationale,
       summary: suggestion.summary,
       fields: suggestion.fields,
+      primary_person: suggestion.primary_person,
+      issuing_organization: suggestion.issuing_organization,
+      reference_number: suggestion.reference_number,
+      amount: suggestion.amount,
+      effective_date: suggestion.effective_date,
+      expiry_date: suggestion.expiry_date,
     }),
   })
 }
@@ -191,6 +243,18 @@ export function refileDocument(id: number): Promise<Document> {
 
 export function skipDocument(id: number): Promise<Document> {
   return request(`/documents/${id}/skip`, { method: 'POST' })
+}
+
+export function archiveDocument(id: number): Promise<Document> {
+  return request(`/documents/${id}/archive`, { method: 'POST' })
+}
+
+export function unarchiveDocument(id: number): Promise<Document> {
+  return request(`/documents/${id}/unarchive`, { method: 'POST' })
+}
+
+export function bulkArchive(docIds: number[]): Promise<{ archived_ids: number[] }> {
+  return request('/documents/bulk-archive', { method: 'POST', body: JSON.stringify({ doc_ids: docIds }) })
 }
 
 export function deleteDocument(id: number): Promise<void> {

@@ -6,12 +6,15 @@ import { Flash } from '../components/Flash'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import {
   applyAi,
+  archiveDocument,
   askAi,
+  commonFieldEntries,
   deleteDocument,
   getDocument,
   patchDocument,
   refileDocument,
   skipDocument,
+  unarchiveDocument,
   type AiSuggestion,
 } from '../api/client'
 
@@ -67,6 +70,16 @@ export default function Detail() {
     onSuccess: () => { refetchDoc(); setFlash({ message: 'Marked skipped', kind: 'success' }) },
   })
 
+  const archiveMutation = useMutation({
+    mutationFn: () => archiveDocument(docId),
+    onSuccess: () => { refetchDoc(); setFlash({ message: 'Archived', kind: 'success' }) },
+  })
+
+  const unarchiveMutation = useMutation({
+    mutationFn: () => unarchiveDocument(docId),
+    onSuccess: () => { refetchDoc(); setFlash({ message: 'Unarchived', kind: 'success' }) },
+  })
+
   const deleteMutation = useMutation({
     mutationFn: () => deleteDocument(docId),
     onSuccess: () => navigate('/?msg=Document+deleted'),
@@ -112,10 +125,32 @@ export default function Detail() {
       <Flash message={flash?.message ?? null} kind={flash?.kind} />
 
       <div className="card">
-        <h1>Document #{doc.id} - {fmt(doc.filename)}</h1>
+        <div className="detail-header">
+          {doc.file_exists && (
+            <a href={`/api/documents/${doc.id}/content`} target="_blank" rel="noopener noreferrer">
+              <img
+                className="doc-thumb-large"
+                src={`/api/documents/${doc.id}/thumbnail`}
+                alt=""
+                onError={(e) => { e.currentTarget.style.display = 'none' }}
+              />
+            </a>
+          )}
+          <h1>Document #{doc.id} - {fmt(doc.filename)}</h1>
+        </div>
 
-        {(doc.ai_rationale || doc.ai_summary || Object.keys(doc.extracted_fields).length > 0) && (
+        {(doc.ai_rationale || doc.ai_summary || commonFieldEntries(doc).length > 0 || Object.keys(doc.extracted_fields).length > 0) && (
           <div className="ai-stack">
+            {commonFieldEntries(doc).length > 0 && (
+              <section className="ai-card">
+                <strong>Common fields</strong>
+                <dl className="field-grid">
+                  {commonFieldEntries(doc).map(([k, v]) => (
+                    <div key={k}><dt>{k}</dt><dd>{v}</dd></div>
+                  ))}
+                </dl>
+              </section>
+            )}
             {doc.ai_rationale && (
               <section className="ai-card"><strong>AI rationale</strong><p>{doc.ai_rationale}</p></section>
             )}
@@ -147,7 +182,7 @@ export default function Detail() {
         </dl>
 
         <div className="toolbar">
-          <button className="btn ghost" onClick={() => navigate('/')}>Back</button>
+          <button className="btn ghost" onClick={() => navigate(-1)}>Back</button>
           {doc.file_exists && (
             <a className="btn" href={`/api/documents/${doc.id}/content`} target="_blank" rel="noopener noreferrer">Open Document</a>
           )}
@@ -197,6 +232,13 @@ export default function Detail() {
               <p><strong>Date:</strong> {suggestion.date || '(none)'} &nbsp; <strong>Category:</strong> {suggestion.category || '(none)'}</p>
               {suggestion.rationale && <p>{suggestion.rationale}</p>}
               {suggestion.summary && <p>{suggestion.summary}</p>}
+              {commonFieldEntries(suggestion).length > 0 && (
+                <dl className="field-grid">
+                  {commonFieldEntries(suggestion).map(([k, v]) => (
+                    <div key={k}><dt>{k}</dt><dd>{v}</dd></div>
+                  ))}
+                </dl>
+              )}
               {Object.keys(suggestion.fields).length > 0 && (
                 <dl className="field-grid">
                   {Object.entries(suggestion.fields).map(([k, v]) => (
@@ -221,6 +263,16 @@ export default function Detail() {
               <span className="badge st-skipped">Skipped</span>
             ) : (
               <button onClick={() => skipMutation.mutate()}>Mark skipped</button>
+            )}
+            {doc.archived ? (
+              <>
+                <span className="badge st-archived">
+                  Archived{doc.archived_reason === 'expired' ? ' (expired)' : ''}
+                </span>
+                <button className="btn subtle" onClick={() => unarchiveMutation.mutate()}>Unarchive</button>
+              </>
+            ) : (
+              <button onClick={() => archiveMutation.mutate()}>Archive</button>
             )}
             <button className="btn danger" onClick={() => setConfirmDelete(true)}>Delete</button>
           </div>
