@@ -67,6 +67,7 @@ export default function Browse() {
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [bulkOpen, setBulkOpen] = useState(false)
   const [flash, setFlash] = useState<{ message: string; kind: 'success' | 'error' } | null>(null)
+  const [preview, setPreview] = useState<{ id: number; top: number; left: number } | null>(null)
 
   const presets = useMemo(datePresets, [])
 
@@ -146,6 +147,25 @@ export default function Browse() {
 
   function refresh() {
     queryClient.invalidateQueries({ queryKey: ['documents'] })
+  }
+
+  function showPreview(e: React.MouseEvent<HTMLImageElement>, id: number) {
+    const rect = e.currentTarget.getBoundingClientRect()
+    const popupWidth = 260
+    const popupMaxHeight = 340
+    const margin = 12
+    const left = rect.right + margin + popupWidth > window.innerWidth
+      ? Math.max(8, rect.left - margin - popupWidth)
+      : rect.right + margin
+    const top = Math.min(
+      Math.max(8, rect.top + rect.height / 2 - popupMaxHeight / 2),
+      window.innerHeight - popupMaxHeight - 8,
+    )
+    setPreview({ id, top, left })
+  }
+
+  function hidePreview() {
+    setPreview(null)
   }
 
   const total = data?.total ?? 0
@@ -231,6 +251,7 @@ export default function Browse() {
                   onChange={toggleSelectAll}
                 />
               </th>
+              <th className="thumb-col" />
               {SORT_COLUMNS.map((col) => (
                 <th key={col.key}>
                   <button type="button" className="sort-header" onClick={() => toggleSort(col.key)}>
@@ -252,15 +273,26 @@ export default function Browse() {
           </thead>
           <tbody>
             {isLoading && (
-              <tr><td colSpan={8}><div className="empty">Loading…</div></td></tr>
+              <tr><td colSpan={9}><div className="empty">Loading…</div></td></tr>
             )}
             {!isLoading && (data?.items.length ?? 0) === 0 && (
-              <tr><td colSpan={8}><div className="empty">No documents match this filter.</div></td></tr>
+              <tr><td colSpan={9}><div className="empty">No documents match this filter.</div></td></tr>
             )}
             {(data?.items ?? []).map((doc) => (
               <tr key={doc.id}>
                 <td className="checkbox-col">
                   <input type="checkbox" checked={selected.has(doc.id)} onChange={() => toggleSelected(doc.id)} />
+                </td>
+                <td className="thumb-col">
+                  <img
+                    className="doc-thumb"
+                    src={`/api/documents/${doc.id}/thumbnail`}
+                    alt=""
+                    loading="lazy"
+                    onError={(e) => { e.currentTarget.style.visibility = 'hidden' }}
+                    onMouseEnter={(e) => showPreview(e, doc.id)}
+                    onMouseLeave={hidePreview}
+                  />
                 </td>
                 <td className="mono">{doc.id}</td>
                 <td>{fmt(doc.filename)}</td>
@@ -288,6 +320,12 @@ export default function Browse() {
           </div>
         )}
       </section>
+
+      {preview && (
+        <div className="thumb-preview" style={{ top: preview.top, left: preview.left }}>
+          <img src={`/api/documents/${preview.id}/thumbnail`} alt="" />
+        </div>
+      )}
 
       {bulkOpen && (
         <BulkAiModal

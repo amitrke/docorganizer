@@ -112,7 +112,19 @@ export default function Detail() {
       <Flash message={flash?.message ?? null} kind={flash?.kind} />
 
       <div className="card">
-        <h1>Document #{doc.id} - {fmt(doc.filename)}</h1>
+        <div className="detail-header">
+          {doc.file_exists && (
+            <a href={`/api/documents/${doc.id}/content`} target="_blank" rel="noopener noreferrer">
+              <img
+                className="doc-thumb-large"
+                src={`/api/documents/${doc.id}/thumbnail`}
+                alt=""
+                onError={(e) => { e.currentTarget.style.display = 'none' }}
+              />
+            </a>
+          )}
+          <h1>Document #{doc.id} - {fmt(doc.filename)}</h1>
+        </div>
 
         {(doc.ai_rationale || doc.ai_summary || Object.keys(doc.extracted_fields).length > 0) && (
           <div className="ai-stack">

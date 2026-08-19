@@ -39,6 +39,7 @@ from .database import (
 from .filer import file_document
 from .pathing import resolve_stored_path, to_stored_path
 from .processor import process_pdf
+from .thumbnail import ensure_thumbnail, thumbnail_path
 from .watcher import start_observer
 
 
@@ -288,6 +289,19 @@ def create_app(cfg: dict, config_path: Path | None = None) -> FastAPI:
         media_type = "application/pdf" if doc_path.suffix.lower() == ".pdf" else "application/octet-stream"
         return FileResponse(path=doc_path, filename=doc_path.name, media_type=media_type)
 
+    @api.get("/documents/{doc_id}/thumbnail")
+    def api_document_thumbnail(doc_id: int):
+        with get_connection(db_path) as conn:
+            row = get_document_by_id(conn, doc_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Document not found")
+        thumb = thumbnail_path(doc_id, cfg)
+        if not thumb.exists():
+            doc_path = _resolve_db_filepath(row["filepath"], cfg, path_base_from, path_base_to, path_rewrites)
+            if not doc_path.exists() or ensure_thumbnail(doc_id, doc_path, cfg) is None:
+                raise HTTPException(status_code=404, detail="Thumbnail unavailable")
+        return FileResponse(path=thumb, media_type="image/jpeg")
+
     @api.patch("/documents/{doc_id}")
     def api_patch_document(doc_id: int, patch: DocumentPatch):
         fields_set = patch.model_fields_set
@@ -366,6 +380,7 @@ def create_app(cfg: dict, config_path: Path | None = None) -> FastAPI:
                             category=payload.category or row["category"],
                         )
                         update_document_fields(conn, doc_id, filepath=to_stored_path(dest, cfg))
+                        ensure_thumbnail(doc_id, dest, cfg)
                 except ValueError:
                     pass
 
@@ -390,6 +405,7 @@ def create_app(cfg: dict, config_path: Path | None = None) -> FastAPI:
             update_document_fields(
                 conn, doc_id, filepath=to_stored_path(dest, cfg), filing_status="filed", skipped=0,
             )
+            ensure_thumbnail(doc_id, dest, cfg)
             row = get_document_by_id(conn, doc_id)
         return _doc_to_dict(row)
 
