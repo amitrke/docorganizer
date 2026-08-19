@@ -22,6 +22,7 @@ from .ai import (
 from .config import add_configured_category, get_configured_categories, remove_configured_category
 from .database import (
     SORT_COLUMNS,
+    archive_document,
     delete_ai_profile,
     get_ai_profile,
     get_connection,
@@ -33,6 +34,8 @@ from .database import (
     parse_extracted_fields,
     search_documents,
     set_active_ai_profile,
+    sweep_expired_documents,
+    unarchive_document,
     update_ai_profile,
     update_document_fields,
 )
@@ -51,6 +54,15 @@ def _valid_iso_date(value: str | None) -> str | None:
     except ValueError:
         return None
     return value
+
+
+def _safe_float(value: str | None) -> float | None:
+    if not value:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
 
 
 def _sort_rows(rows: list, sort_by: str, sort_dir: str) -> list:
@@ -131,6 +143,15 @@ def _doc_to_dict(row) -> dict:
         "ai_rationale": row["ai_rationale"],
         "ai_summary": row["ai_summary"],
         "extracted_fields": parse_extracted_fields(row["extracted_fields"]),
+        "primary_person": row["primary_person"],
+        "issuing_organization": row["issuing_organization"],
+        "reference_number": row["reference_number"],
+        "amount": row["amount"],
+        "effective_date": row["effective_date"],
+        "expiry_date": row["expiry_date"],
+        "archived_at": row["archived_at"],
+        "archived_reason": row["archived_reason"],
+        "archived": row["archived_at"] is not None,
         "filing_status": row["filing_status"],
         "last_reviewed_at": row["last_reviewed_at"],
         "skipped": bool(row["skipped"]),
@@ -149,9 +170,19 @@ class ApplyAiRequest(BaseModel):
     rationale: str | None = None
     summary: str | None = None
     fields: dict[str, str] = {}
+    primary_person: str | None = None
+    issuing_organization: str | None = None
+    reference_number: str | None = None
+    amount: str | None = None
+    effective_date: str | None = None
+    expiry_date: str | None = None
 
 
 class BulkAskAiRequest(BaseModel):
+    doc_ids: list[int]
+
+
+class BulkArchiveRequest(BaseModel):
     doc_ids: list[int]
 
 
@@ -226,34 +257,65 @@ def create_app(cfg: dict, config_path: Path | None = None) -> FastAPI:
     @api.get("/documents")
     def api_list_documents(
         q: str = Query(default="", max_length=200),
-        status: str = Query(default="all", pattern="^(all|pending|filed)$"),
+        status: str = Query(default="all", pattern="^(all|pending|filed|archived)$"),
         category: str | None = Query(default=None),
         date_from: str | None = Query(default=None),
         date_to: str | None = Query(default=None),
+        expiry_from: str | None = Query(default=None),
+        expiry_to: str | None = Query(default=None),
+        amount_min: float | None = Query(default=None),
+        amount_max: float | None = Query(default=None),
+        person: str | None = Query(default=None),
+        organization: str | None = Query(default=None),
+        reference_number: str | None = Query(default=None),
         sort_by: str = Query(default="detected_date"),
         sort_dir: str = Query(default="desc", pattern="^(asc|desc)$"),
         page: int = Query(default=1, ge=1),
     ):
         resolved_from = _valid_iso_date(date_from)
         resolved_to = _valid_iso_date(date_to)
+        resolved_expiry_from = _valid_iso_date(expiry_from)
+        resolved_expiry_to = _valid_iso_date(expiry_to)
         resolved_sort_by = sort_by if sort_by in SORT_COLUMNS else "detected_date"
+        archived_only = status == "archived"
         with get_connection(db_path) as conn:
+            sweep_expired_documents(conn)
             db_categories = list_categories(conn)
             if q.strip():
                 rows = search_documents(conn, q.strip())
-                if status != "all":
+                rows = [r for r in rows if (r["archived_at"] is not None) == archived_only]
+                if status not in ("all", "archived"):
                     rows = [r for r in rows if r["filing_status"] == status]
                 if category:
                     rows = [r for r in rows if r["category"] == category]
+                if person:
+                    rows = [r for r in rows if person.lower() in (r["primary_person"] or "").lower()]
+                if organization:
+                    rows = [r for r in rows if organization.lower() in (r["issuing_organization"] or "").lower()]
+                if reference_number:
+                    rows = [r for r in rows if reference_number.lower() in (r["reference_number"] or "").lower()]
                 if resolved_from:
                     rows = [r for r in rows if (r["detected_date"] or "") >= resolved_from]
                 if resolved_to:
                     rows = [r for r in rows if (r["detected_date"] or "") <= resolved_to]
+                if resolved_expiry_from:
+                    rows = [r for r in rows if (r["expiry_date"] or "") >= resolved_expiry_from]
+                if resolved_expiry_to:
+                    rows = [r for r in rows if (r["expiry_date"] or "") <= resolved_expiry_to]
+                if amount_min is not None:
+                    rows = [r for r in rows if _safe_float(r["amount"]) is not None and _safe_float(r["amount"]) >= amount_min]
+                if amount_max is not None:
+                    rows = [r for r in rows if _safe_float(r["amount"]) is not None and _safe_float(r["amount"]) <= amount_max]
                 rows = _sort_rows(rows, resolved_sort_by, sort_dir)
             else:
                 rows = list_documents(conn, status=status, category=category,
                                       date_from=resolved_from, date_to=resolved_to,
-                                      sort_by=resolved_sort_by, sort_dir=sort_dir)
+                                      expiry_from=resolved_expiry_from, expiry_to=resolved_expiry_to,
+                                      amount_min=amount_min, amount_max=amount_max,
+                                      person=person, organization=organization,
+                                      reference_number=reference_number,
+                                      sort_by=resolved_sort_by, sort_dir=sort_dir,
+                                      archived_only=archived_only)
         total = len(rows)
         offset = (page - 1) * _PAGE_SIZE
         page_rows = rows[offset: offset + _PAGE_SIZE]
@@ -365,6 +427,12 @@ def create_app(cfg: dict, config_path: Path | None = None) -> FastAPI:
                 ai_rationale=payload.rationale or None,
                 ai_summary=payload.summary or None,
                 extracted_fields=payload.fields or None,
+                primary_person=payload.primary_person or None,
+                issuing_organization=payload.issuing_organization or None,
+                reference_number=payload.reference_number or None,
+                amount=payload.amount or None,
+                effective_date=payload.effective_date or None,
+                expiry_date=payload.expiry_date or None,
                 skipped=0,
             )
 
@@ -418,6 +486,36 @@ def create_app(cfg: dict, config_path: Path | None = None) -> FastAPI:
             update_document_fields(conn, doc_id, skipped=1)
             row = get_document_by_id(conn, doc_id)
         return _doc_to_dict(row)
+
+    @api.post("/documents/{doc_id}/archive")
+    def api_archive(doc_id: int):
+        with get_connection(db_path) as conn:
+            row = get_document_by_id(conn, doc_id)
+            if not row:
+                raise HTTPException(status_code=404, detail="Document not found")
+            archive_document(conn, doc_id, reason="manual")
+            row = get_document_by_id(conn, doc_id)
+        return _doc_to_dict(row)
+
+    @api.post("/documents/{doc_id}/unarchive")
+    def api_unarchive(doc_id: int):
+        with get_connection(db_path) as conn:
+            row = get_document_by_id(conn, doc_id)
+            if not row:
+                raise HTTPException(status_code=404, detail="Document not found")
+            unarchive_document(conn, doc_id)
+            row = get_document_by_id(conn, doc_id)
+        return _doc_to_dict(row)
+
+    @api.post("/documents/bulk-archive")
+    def api_bulk_archive(payload: BulkArchiveRequest):
+        archived_ids: list[int] = []
+        with get_connection(db_path) as conn:
+            for doc_id in payload.doc_ids:
+                if get_document_by_id(conn, doc_id):
+                    archive_document(conn, doc_id, reason="manual")
+                    archived_ids.append(doc_id)
+        return {"archived_ids": archived_ids}
 
     @api.delete("/documents/{doc_id}", status_code=204)
     def api_delete(doc_id: int):

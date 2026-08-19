@@ -1,6 +1,7 @@
 import json
 import re
 import sqlite3
+from datetime import date
 from urllib import request
 from urllib.error import HTTPError
 
@@ -21,6 +22,11 @@ PROVIDER_DEFAULTS: dict[str, dict[str, object]] = {
     # Studio, or any other OpenAI-compatible endpoint. Base URL is required for this one.
     "custom": {"base_url": "", "requires_key": False},
 }
+
+# Providers confirmed to support OpenAI's response_format={"type": "json_object"}.
+# Excludes "poe" and "custom" (arbitrary self-hosted servers) since support there
+# is unverified and an unrecognized field could hard-fail the request.
+_JSON_MODE_PROVIDERS = {"openrouter", "nvidia", "mistral", "deepseek", "gemini"}
 
 DEFAULT_AI_SETTINGS: dict[str, object] = {
     "provider": "ollama",
@@ -159,6 +165,17 @@ def _repair_truncated_json(text: str) -> str | None:
     return "".join(repaired)
 
 
+_REASONING_TAG_RE = re.compile(
+    r"<(think|thinking|reasoning)\b[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL,
+)
+
+
+def _strip_reasoning_tags(text: str) -> str:
+    """Drop <think>/<thinking>/<reasoning> blocks some "reasoning" models emit
+    before their actual answer, so JSON extraction looks past them."""
+    return _REASONING_TAG_RE.sub("", text).strip()
+
+
 def _extract_json_block(text: str) -> dict | None:
     text = text.strip()
     try:
@@ -246,12 +263,20 @@ def _call_openai_compatible(ai_cfg: dict, prompt: str, timeout: int) -> str:
     base_url = ai_cfg.get("base_url") or defaults.get("base_url", "")
     url = base_url.rstrip("/") + "/chat/completions"
 
-    payload = {
+    payload: dict = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.1,
         "max_tokens": int(ai_cfg.get("max_tokens", 768)),
     }
+    if provider in _JSON_MODE_PROVIDERS:
+        # Constrains the whole response to a JSON object, the same way Ollama's
+        # format="json" does — otherwise a reasoning-capable model can spend its
+        # entire token budget on free-text chain-of-thought and never emit JSON
+        # at all. Only enabled for providers confirmed to support this OpenAI
+        # field; "poe" and "custom" (arbitrary self-hosted servers) are too
+        # unpredictable to risk a hard 400 on an unrecognized parameter.
+        payload["response_format"] = {"type": "json_object"}
     headers = {"Content-Type": "application/json"}
     if provider == "openrouter":
         # OpenRouter uses these for attribution/rankings; harmless elsewhere but scoped anyway.
@@ -312,7 +337,8 @@ def suggest_date_category(*, text: str, filename: str, categories: list[str], ai
 
     prompt = (
         "Extract the most likely document date and category from this document text. "
-        "Return ONLY strict JSON with keys: date, category, rationale, summary, fields. "
+        "Return ONLY strict JSON with keys: date, category, rationale, summary, fields, "
+        "primary_person, issuing_organization, reference_number, amount, effective_date, expiry_date. "
         "Date must be YYYY-MM-DD or null. Category must be one of: "
         f"{', '.join(categories) if categories else '(none)'} or null. "
         "Rationale should briefly explain the evidence behind the date and category. "
@@ -320,6 +346,14 @@ def suggest_date_category(*, text: str, filename: str, categories: list[str], ai
         "Fields must be a JSON object of explicit document facts using snake_case keys such as "
         "total_amount, location, invoice_number, account_number, provider_name, due_date, or tax_year. "
         "Do not invent values; omit uncertain fields.\n\n"
+        "primary_person is the individual the document is primarily about or for (e.g. applicant, "
+        "patient, tenant, policyholder, taxpayer). issuing_organization is the counterparty that issued "
+        "or sent the document (e.g. a government agency, insurer, utility, landlord, employer). "
+        "reference_number is the single most prominent identifying number on the document (e.g. policy, "
+        "account, permit, or case number). amount is the single most prominent dollar figure, as plain "
+        "text (e.g. \"1234.56\"), if the document has one. effective_date and expiry_date are the start "
+        "and end of the document's validity period (e.g. lease term, permit validity, policy period), "
+        "each YYYY-MM-DD or null. Return null for any of these six not clearly stated in the text.\n\n"
         f"Filename: {filename}\n\n"
         f"Document text:\n{text[:8000]}"
     )
@@ -331,9 +365,21 @@ def suggest_date_category(*, text: str, filename: str, categories: list[str], ai
         suggest_date_category.last_error = f"{provider} request failed: {exc}"
         return None
 
-    parsed = _extract_json_block(raw)
+    cleaned = _strip_reasoning_tags(raw)
+    parsed = _extract_json_block(cleaned)
     if not parsed:
-        suggest_date_category.last_error = f"Could not parse JSON from model response: {raw[:200]!r}"
+        if "{" not in cleaned:
+            # No JSON anywhere in the response — almost always a "reasoning" model
+            # that spent its whole token budget thinking out loud and got cut off
+            # before ever emitting the answer, rather than a malformed-JSON issue.
+            suggest_date_category.last_error = (
+                "The AI model returned reasoning text but no JSON — it likely ran out of "
+                "its token budget before producing an answer. Try raising Max tokens for "
+                "this profile in AI Settings, or switch to a less verbose/non-reasoning model. "
+                f"Response started with: {cleaned[:200]!r}"
+            )
+        else:
+            suggest_date_category.last_error = f"Could not parse JSON from model response: {cleaned[:200]!r}"
         return None
 
     date_value = parsed.get("date")
@@ -346,10 +392,43 @@ def suggest_date_category(*, text: str, filename: str, categories: list[str], ai
         normalized = {c.lower(): c for c in categories}
         category_value = normalized.get(category_value.lower())
 
+    def _text_or_none(value: object) -> str | None:
+        if not isinstance(value, str):
+            return None
+        cleaned = value.strip()
+        return cleaned or None
+
+    def _iso_date_or_none(value: object) -> str | None:
+        cleaned = _text_or_none(value)
+        if not cleaned:
+            return None
+        try:
+            date.fromisoformat(cleaned)
+        except ValueError:
+            return None
+        return cleaned
+
+    def _amount_or_none(value: object) -> str | None:
+        cleaned = _text_or_none(value)
+        if not cleaned:
+            return None
+        stripped = cleaned.replace("$", "").replace(",", "").strip()
+        try:
+            parsed_amount = float(stripped)
+        except ValueError:
+            return None
+        return f"{parsed_amount:.2f}"
+
     return {
         "date": date_value if isinstance(date_value, str) else None,
         "category": category_value if isinstance(category_value, str) else None,
         "rationale": rationale if isinstance(rationale, str) else "",
         "summary": summary if isinstance(summary, str) else "",
         "fields": fields,
+        "primary_person": _text_or_none(parsed.get("primary_person")),
+        "issuing_organization": _text_or_none(parsed.get("issuing_organization")),
+        "reference_number": _text_or_none(parsed.get("reference_number")),
+        "amount": _amount_or_none(parsed.get("amount")),
+        "effective_date": _iso_date_or_none(parsed.get("effective_date")),
+        "expiry_date": _iso_date_or_none(parsed.get("expiry_date")),
     }
