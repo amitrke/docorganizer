@@ -54,7 +54,11 @@ export interface AskAiResponse {
   error: string | null
 }
 
-const COMMON_FIELD_LABELS: [key: keyof AiSuggestion, label: string][] = [
+type CommonFieldKey =
+  | 'primary_person' | 'issuing_organization' | 'reference_number'
+  | 'amount' | 'effective_date' | 'expiry_date'
+
+const COMMON_FIELD_LABELS: [key: CommonFieldKey, label: string][] = [
   ['primary_person', 'Primary person'],
   ['issuing_organization', 'Issuing organization'],
   ['reference_number', 'Reference number'],
@@ -63,9 +67,7 @@ const COMMON_FIELD_LABELS: [key: keyof AiSuggestion, label: string][] = [
   ['expiry_date', 'Expiry date'],
 ]
 
-export function commonFieldEntries(source: Pick<AiSuggestion,
-  'primary_person' | 'issuing_organization' | 'reference_number' | 'amount' | 'effective_date' | 'expiry_date'
->): [string, string][] {
+export function commonFieldEntries(source: Pick<AiSuggestion, CommonFieldKey>): [string, string][] {
   return COMMON_FIELD_LABELS
     .map(([key, label]) => [label, source[key]] as [string, string | null])
     .filter((pair): pair is [string, string] => Boolean(pair[1]))
