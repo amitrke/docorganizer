@@ -34,6 +34,11 @@ CREATE TABLE IF NOT EXISTS documents (
     filing_status        TEXT NOT NULL DEFAULT 'pending',
     last_reviewed_at     TEXT,
     skipped              INTEGER NOT NULL DEFAULT 0,
+    ai_attempts          INTEGER NOT NULL DEFAULT 0,
+    ai_last_error        TEXT,
+    ai_next_attempt_at   TEXT,
+    ai_pending_suggestion TEXT,
+    ai_model             TEXT,
     created_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
 );
 """
@@ -79,8 +84,8 @@ CREATE TABLE IF NOT EXISTS app_settings (
     value TEXT NOT NULL
 );
 
--- Named, switchable AI provider configs. At most one row has is_active=1;
--- enforced in application code (set_active_ai_profile), not a DB constraint.
+-- Named AI provider configs. is_active=1 means the profile is enabled and part of
+-- the pool; `priority` (ascending) orders the pool for fallback/round-robin.
 CREATE TABLE IF NOT EXISTS ai_profiles (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     name        TEXT NOT NULL,
@@ -91,6 +96,7 @@ CREATE TABLE IF NOT EXISTS ai_profiles (
     timeout     INTEGER NOT NULL DEFAULT 180,
     max_tokens  INTEGER NOT NULL DEFAULT 1200,
     is_active   INTEGER NOT NULL DEFAULT 0,
+    priority    INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
 );
 """
@@ -169,6 +175,19 @@ def _migrate(conn) -> None:
         conn.execute("ALTER TABLE documents ADD COLUMN archived_at TEXT")
     if "archived_reason" not in existing:
         conn.execute("ALTER TABLE documents ADD COLUMN archived_reason TEXT")
+    for column, ddl in (
+        ("ai_attempts", "INTEGER NOT NULL DEFAULT 0"),
+        ("ai_last_error", "TEXT"),
+        ("ai_next_attempt_at", "TEXT"),
+        ("ai_pending_suggestion", "TEXT"),
+        ("ai_model", "TEXT"),
+    ):
+        if column not in existing:
+            conn.execute(f"ALTER TABLE documents ADD COLUMN {column} {ddl}")
+    profile_cols = {row[1] for row in conn.execute("PRAGMA table_info(ai_profiles)")}
+    if "priority" not in profile_cols:
+        conn.execute("ALTER TABLE ai_profiles ADD COLUMN priority INTEGER NOT NULL DEFAULT 0")
+        conn.execute("UPDATE ai_profiles SET priority = id")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_content_hash ON documents(content_hash)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_expiry_date ON documents(expiry_date)")
 
@@ -416,7 +435,7 @@ def set_app_setting(conn: sqlite3.Connection, key: str, value: str) -> None:
 
 def list_ai_profiles(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return conn.execute(
-        "SELECT * FROM ai_profiles ORDER BY created_at, id"
+        "SELECT * FROM ai_profiles ORDER BY priority, id"
     ).fetchall()
 
 
@@ -426,21 +445,20 @@ def get_ai_profile(conn: sqlite3.Connection, profile_id: int) -> sqlite3.Row | N
     ).fetchone()
 
 
-def get_active_ai_profile(conn: sqlite3.Connection) -> sqlite3.Row | None:
+def list_enabled_ai_profiles(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Enabled profiles in priority order — the pool used for AI work."""
     return conn.execute(
-        "SELECT * FROM ai_profiles WHERE is_active = 1 LIMIT 1"
-    ).fetchone()
+        "SELECT * FROM ai_profiles WHERE is_active = 1 ORDER BY priority, id"
+    ).fetchall()
 
 
 def insert_ai_profile(conn: sqlite3.Connection, *, name: str, provider: str, model: str,
                       base_url: str, api_key: str, timeout: int, max_tokens: int,
                       is_active: bool = False) -> int:
-    if is_active:
-        conn.execute("UPDATE ai_profiles SET is_active = 0")
     cur = conn.execute(
         """
-        INSERT INTO ai_profiles (name, provider, model, base_url, api_key, timeout, max_tokens, is_active)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO ai_profiles (name, provider, model, base_url, api_key, timeout, max_tokens, is_active, priority)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(priority), 0) + 1 FROM ai_profiles))
         """,
         (name, provider, model, base_url, api_key, timeout, max_tokens, 1 if is_active else 0),
     )
@@ -474,14 +492,17 @@ def delete_ai_profile(conn: sqlite3.Connection, profile_id: int) -> None:
     conn.commit()
 
 
-def set_active_ai_profile(conn: sqlite3.Connection, profile_id: int) -> None:
-    conn.execute("UPDATE ai_profiles SET is_active = 0")
-    conn.execute("UPDATE ai_profiles SET is_active = 1 WHERE id = ?", (profile_id,))
+def set_ai_profile_enabled(conn: sqlite3.Connection, profile_id: int, enabled: bool) -> None:
+    conn.execute("UPDATE ai_profiles SET is_active = ? WHERE id = ?", (1 if enabled else 0, profile_id))
     conn.commit()
 
 
-def clear_active_ai_profile(conn: sqlite3.Connection) -> None:
-    conn.execute("UPDATE ai_profiles SET is_active = 0")
+def reorder_ai_profiles(conn: sqlite3.Connection, ordered_ids: list[int]) -> None:
+    """Set priority from the given id order; profiles not listed keep their order after."""
+    listed = [i for i in ordered_ids if get_ai_profile(conn, i)]
+    rest = [r["id"] for r in list_ai_profiles(conn) if r["id"] not in listed]
+    for position, profile_id in enumerate(listed + rest, start=1):
+        conn.execute("UPDATE ai_profiles SET priority = ? WHERE id = ?", (position, profile_id))
     conn.commit()
 
 
@@ -510,6 +531,8 @@ def update_document_fields(conn: sqlite3.Connection, doc_id: int, *,
                            filepath: str | None = None,
                            filing_status: str | None = None,
                            skipped: int | None = None,
+                           ai_model: str | None = None,
+                           clear_ai_queue_state: bool = False,
                            archived_at: str | None = None,
                            archived_reason: str | None = None,
                            clear_ai_metadata: bool = False,
@@ -569,6 +592,13 @@ def update_document_fields(conn: sqlite3.Connection, doc_id: int, *,
     if skipped is not None:
         updates.append("skipped = ?")
         params.append(skipped)
+    if ai_model is not None:
+        updates.append("ai_model = ?")
+        params.append(ai_model)
+    if clear_ai_queue_state:
+        updates.append("ai_pending_suggestion = NULL")
+        updates.append("ai_last_error = NULL")
+        updates.append("ai_next_attempt_at = NULL")
     if clear_archived:
         updates.append("archived_at = NULL")
         updates.append("archived_reason = NULL")
@@ -596,3 +626,124 @@ def update_document_fields(conn: sqlite3.Connection, doc_id: int, *,
         params,
     )
     conn.commit()
+
+
+# --- Background AI queue ------------------------------------------------------
+
+AI_SETTING_DEFAULTS = {
+    "ai_mode": "fallback",            # fallback | round_robin | consensus
+    "ai_auto_apply": "0",             # "1" = apply good suggestions, else store for review
+    "ai_background_enabled": "1",
+    "ai_max_attempts": "5",
+}
+
+
+def get_ai_queue_settings(conn: sqlite3.Connection) -> dict:
+    def _get(key: str) -> str:
+        return get_app_setting(conn, key) or AI_SETTING_DEFAULTS[key]
+
+    mode = _get("ai_mode")
+    if mode not in {"fallback", "round_robin", "consensus"}:
+        mode = "fallback"
+    try:
+        max_attempts = max(1, int(_get("ai_max_attempts")))
+    except ValueError:
+        max_attempts = int(AI_SETTING_DEFAULTS["ai_max_attempts"])
+    return {
+        "mode": mode,
+        "auto_apply": _get("ai_auto_apply") == "1",
+        "background_enabled": _get("ai_background_enabled") == "1",
+        "max_attempts": max_attempts,
+    }
+
+
+def set_ai_queue_settings(conn: sqlite3.Connection, *, mode: str | None = None,
+                          auto_apply: bool | None = None,
+                          background_enabled: bool | None = None,
+                          max_attempts: int | None = None) -> None:
+    if mode is not None:
+        set_app_setting(conn, "ai_mode", mode)
+    if auto_apply is not None:
+        set_app_setting(conn, "ai_auto_apply", "1" if auto_apply else "0")
+    if background_enabled is not None:
+        set_app_setting(conn, "ai_background_enabled", "1" if background_enabled else "0")
+    if max_attempts is not None:
+        set_app_setting(conn, "ai_max_attempts", str(max(1, max_attempts)))
+
+
+# A document "needs AI" until it has a summary/AI category or a pending suggestion.
+_NEEDS_AI_SQL = (
+    "archived_at IS NULL AND skipped = 0 "
+    "AND ai_summary IS NULL AND ai_suggested_category IS NULL "
+    "AND ai_pending_suggestion IS NULL"
+)
+
+
+def list_docs_needing_ai(conn: sqlite3.Connection, *, max_attempts: int, limit: int = 5) -> list[sqlite3.Row]:
+    """Needs-AI documents that are due for an attempt (not backed off, not exhausted)."""
+    return conn.execute(
+        f"""
+        SELECT * FROM documents
+        WHERE {_NEEDS_AI_SQL}
+          AND ai_attempts < ?
+          AND (ai_next_attempt_at IS NULL OR ai_next_attempt_at <= ?)
+        ORDER BY ai_attempts, id
+        LIMIT ?
+        """,
+        (max_attempts, _now_iso(), limit),
+    ).fetchall()
+
+
+def ai_queue_counts(conn: sqlite3.Connection, *, max_attempts: int) -> dict:
+    waiting = conn.execute(
+        f"SELECT COUNT(*) FROM documents WHERE {_NEEDS_AI_SQL} AND ai_attempts < ?", (max_attempts,)
+    ).fetchone()[0]
+    exhausted = conn.execute(
+        f"SELECT COUNT(*) FROM documents WHERE {_NEEDS_AI_SQL} AND ai_attempts >= ?", (max_attempts,)
+    ).fetchone()[0]
+    pending_review = conn.execute(
+        "SELECT COUNT(*) FROM documents WHERE archived_at IS NULL AND ai_pending_suggestion IS NOT NULL"
+    ).fetchone()[0]
+    return {"waiting": waiting, "exhausted": exhausted, "pending_review": pending_review}
+
+
+def record_ai_failure(conn: sqlite3.Connection, doc_id: int, error: str, *, next_attempt_at: str) -> None:
+    conn.execute(
+        """
+        UPDATE documents
+        SET ai_attempts = ai_attempts + 1, ai_last_error = ?, ai_next_attempt_at = ?
+        WHERE id = ?
+        """,
+        (error[:1000], next_attempt_at, doc_id),
+    )
+    conn.commit()
+
+
+def store_pending_ai_suggestion(conn: sqlite3.Connection, doc_id: int, suggestion: dict, model: str) -> None:
+    conn.execute(
+        """
+        UPDATE documents
+        SET ai_pending_suggestion = ?, ai_model = ?, ai_last_error = NULL,
+            ai_attempts = ai_attempts + 1, ai_next_attempt_at = NULL
+        WHERE id = ?
+        """,
+        (json.dumps(suggestion), model, doc_id),
+    )
+    conn.commit()
+
+
+def clear_pending_ai_suggestion(conn: sqlite3.Connection, doc_id: int) -> None:
+    conn.execute(
+        "UPDATE documents SET ai_pending_suggestion = NULL, ai_attempts = 0, ai_next_attempt_at = NULL WHERE id = ?",
+        (doc_id,),
+    )
+    conn.commit()
+
+
+def reset_ai_retries(conn: sqlite3.Connection) -> int:
+    """Make every needs-AI document immediately due again (including exhausted ones)."""
+    cur = conn.execute(
+        f"UPDATE documents SET ai_attempts = 0, ai_next_attempt_at = NULL WHERE {_NEEDS_AI_SQL}"
+    )
+    conn.commit()
+    return cur.rowcount

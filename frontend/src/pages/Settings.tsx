@@ -6,12 +6,18 @@ import {
   ApiError,
   activateAiProfile,
   createAiProfile,
+  deactivateAiProfile,
   deleteAiProfile,
+  getAiQueue,
   getMeta,
   listAiProfiles,
+  reorderAiProfiles,
+  retryUnsummarised,
+  updateAiSettings,
   testAiProfile,
   testAiProfileDraft,
   updateAiProfile,
+  type AiMode,
   type AiProfile,
   type AiProfileInput,
 } from '../api/client'
@@ -36,6 +42,7 @@ export default function Settings() {
   const queryClient = useQueryClient()
   const { data: meta } = useQuery({ queryKey: ['meta'], queryFn: getMeta })
   const { data: profiles } = useQuery({ queryKey: ['ai-profiles'], queryFn: listAiProfiles })
+  const { data: queue } = useQuery({ queryKey: ['ai-queue'], queryFn: getAiQueue, refetchInterval: 15000 })
 
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [hasAutoSelected, setHasAutoSelected] = useState(false)
@@ -124,7 +131,40 @@ export default function Settings() {
     if (!selected) return
     await activateAiProfile(selected.id)
     await refresh()
-    setFlash({ message: `"${selected.name}" is now active`, kind: 'success' })
+    setFlash({ message: `"${selected.name}" is now enabled`, kind: 'success' })
+  }
+
+  async function handleDeactivate() {
+    if (!selected) return
+    await deactivateAiProfile(selected.id)
+    await refresh()
+    setFlash({ message: `"${selected.name}" is now disabled`, kind: 'success' })
+  }
+
+  async function handleMove(id: number, delta: -1 | 1) {
+    if (!profiles) return
+    const ids = profiles.map((p) => p.id)
+    const from = ids.indexOf(id)
+    const to = from + delta
+    if (to < 0 || to >= ids.length) return
+    ;[ids[from], ids[to]] = [ids[to], ids[from]]
+    await reorderAiProfiles(ids)
+    await refresh()
+  }
+
+  async function handleQueueSettings(patch: Parameters<typeof updateAiSettings>[0]) {
+    try {
+      await updateAiSettings(patch)
+      await queryClient.invalidateQueries({ queryKey: ['ai-queue'] })
+    } catch (err) {
+      setFlash({ message: err instanceof ApiError ? err.message : 'Could not save setting', kind: 'error' })
+    }
+  }
+
+  async function handleRetryAll() {
+    const { queued } = await retryUnsummarised()
+    await queryClient.invalidateQueries({ queryKey: ['ai-queue'] })
+    setFlash({ message: `${queued} document${queued === 1 ? '' : 's'} queued for AI retry`, kind: 'success' })
   }
 
   async function handleDelete() {
@@ -140,19 +180,19 @@ export default function Settings() {
 
   return (
     <>
-      <Hero title="AI Settings" subtitle="Save multiple AI provider configs and switch which one is active." active="settings" />
+      <Hero title="AI Settings" subtitle="Enable several AI provider configs, set their order, and control background retries." active="settings" />
       <Flash message={flash?.message ?? null} kind={flash?.kind} />
 
       <div className="card">
         <h1>AI Provider Configs</h1>
         <p className="hint">
-          Each config remembers its own provider, model, and API key. Only one is active at a time — that's
-          the one "Ask AI" uses.
+          Each config remembers its own provider, model, and API key. Enable as many as you like — they form a
+          pool used by "Ask AI" and by background retries, in the order shown (use the arrows to reorder).
         </p>
 
         <ul className="category-list" style={{ marginBottom: 18 }}>
           {(profiles?.length ?? 0) === 0 && <li className="hint">No AI configs yet — create one below.</li>}
-          {profiles?.map((p: AiProfile) => (
+          {profiles?.map((p: AiProfile, index) => (
             <li
               key={p.id}
               className={`profile-row${p.id === selectedId ? ' selected' : ''}`}
@@ -164,7 +204,15 @@ export default function Settings() {
                   {PROVIDER_LABELS[p.provider] ?? p.provider}{p.model ? ` · ${p.model}` : ''}
                 </span>
               </span>
-              {p.is_active && <span className="badge st-filed">Active</span>}
+              <span>
+                <button className="btn subtle" title="Move up" disabled={index === 0}
+                  onClick={(e) => { e.stopPropagation(); handleMove(p.id, -1) }}>↑</button>
+                <button className="btn subtle" title="Move down" disabled={index === profiles.length - 1}
+                  onClick={(e) => { e.stopPropagation(); handleMove(p.id, 1) }}>↓</button>
+                {p.is_active
+                  ? <span className="badge st-filed">Enabled</span>
+                  : <span className="badge st-skipped">Disabled</span>}
+              </span>
             </li>
           ))}
         </ul>
@@ -253,7 +301,10 @@ export default function Settings() {
             </button>
             <button onClick={handleTest} disabled={testing}>{testing ? 'Testing…' : 'Test connection'}</button>
             {selected && !selected.is_active && (
-              <button className="btn subtle" onClick={handleActivate}>Activate</button>
+              <button className="btn subtle" onClick={handleActivate}>Enable</button>
+            )}
+            {selected && selected.is_active && (
+              <button className="btn subtle" onClick={handleDeactivate}>Disable</button>
             )}
             {selected && (
               <button className="btn danger" onClick={handleDelete}>Delete</button>
@@ -261,6 +312,61 @@ export default function Settings() {
           </div>
 
           {testResult && <div style={{ marginTop: 12 }}><Flash message={testResult.message} kind={testResult.ok ? 'success' : 'error'} /></div>}
+        </div>
+
+        <div className="action-panel">
+          <h3>Background AI</h3>
+          <p className="hint">
+            Documents with no AI summary are retried automatically with exponential backoff, using the enabled
+            profiles above.
+          </p>
+          <div className="inline-form">
+            <div className="field">
+              <label>Profile mode</label>
+              <select
+                value={queue?.settings.mode ?? 'fallback'}
+                onChange={(e) => handleQueueSettings({ mode: e.target.value as AiMode })}
+              >
+                <option value="fallback">Fallback — try in order until one works</option>
+                <option value="round_robin">Round-robin — spread documents across profiles</option>
+                <option value="consensus">Consensus — two models must agree on the category</option>
+              </select>
+            </div>
+            <div className="field">
+              <label>Max attempts per document</label>
+              <input
+                type="number" min={1}
+                defaultValue={queue?.settings.max_attempts ?? 5}
+                key={queue?.settings.max_attempts}
+                onBlur={(e) => handleQueueSettings({ max_attempts: Math.max(1, Number(e.target.value) || 1) })}
+              />
+            </div>
+          </div>
+          <p>
+            <label>
+              <input
+                type="checkbox"
+                checked={queue?.settings.background_enabled ?? true}
+                onChange={(e) => handleQueueSettings({ background_enabled: e.target.checked })}
+              />{' '}Run background retries
+            </label>
+            <br />
+            <label>
+              <input
+                type="checkbox"
+                checked={queue?.settings.auto_apply ?? false}
+                onChange={(e) => handleQueueSettings({ auto_apply: e.target.checked })}
+              />{' '}Apply suggestions automatically (refiles by date and category). Off = store them for review on each document.
+            </label>
+          </p>
+          <div className="inline-form">
+            <span>
+              <strong>{queue?.waiting ?? 0}</strong> waiting
+              {' · '}<strong>{queue?.exhausted ?? 0}</strong> gave up
+              {' · '}<strong>{queue?.pending_review ?? 0}</strong> awaiting review
+            </span>
+            <button onClick={handleRetryAll}>Retry AI for all unsummarised</button>
+          </div>
         </div>
 
         <p className="hint" style={{ marginTop: 8 }}>

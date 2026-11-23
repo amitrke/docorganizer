@@ -23,6 +23,11 @@ export interface Document {
   filing_status: string
   last_reviewed_at: string | null
   skipped: boolean
+  ai_attempts: number
+  ai_last_error: string | null
+  ai_next_attempt_at: string | null
+  ai_model: string | null
+  ai_pending_suggestion: AiSuggestion | null
   created_at: string
   file_exists?: boolean
 }
@@ -52,6 +57,23 @@ export interface AiSuggestion {
 export interface AskAiResponse {
   suggestion: AiSuggestion | null
   error: string | null
+  profile?: string | null
+}
+
+export type AiMode = 'fallback' | 'round_robin' | 'consensus'
+
+export interface AiQueueSettings {
+  mode: AiMode
+  auto_apply: boolean
+  background_enabled: boolean
+  max_attempts: number
+}
+
+export interface AiQueueStatus {
+  waiting: number
+  exhausted: number
+  pending_review: number
+  settings: AiQueueSettings
 }
 
 type CommonFieldKey =
@@ -116,6 +138,7 @@ export interface AiProfile {
   timeout: number
   max_tokens: number
   is_active: boolean
+  priority: number
   has_key: boolean
 }
 
@@ -139,6 +162,7 @@ export interface BulkAskAiEvent {
   status: 'suggested' | 'error'
   suggestion?: AiSuggestion
   error?: string
+  profile?: string | null
 }
 
 class ApiError extends Error {
@@ -220,10 +244,15 @@ export function askAi(id: number): Promise<AskAiResponse> {
   return request(`/documents/${id}/ask-ai`, { method: 'POST' })
 }
 
-export function applyAi(id: number, suggestion: AiSuggestion): Promise<Document> {
+export function dismissAi(id: number): Promise<Document> {
+  return request(`/documents/${id}/dismiss-ai`, { method: 'POST' })
+}
+
+export function applyAi(id: number, suggestion: AiSuggestion, profile?: string | null): Promise<Document> {
   return request(`/documents/${id}/apply-ai`, {
     method: 'POST',
     body: JSON.stringify({
+      profile: profile ?? null,
       detected_date: suggestion.date,
       category: suggestion.category,
       rationale: suggestion.rationale,
@@ -353,6 +382,26 @@ export function deleteAiProfile(id: number): Promise<void> {
 
 export function activateAiProfile(id: number): Promise<AiProfile> {
   return request(`/ai-profiles/${id}/activate`, { method: 'POST' })
+}
+
+export function deactivateAiProfile(id: number): Promise<AiProfile> {
+  return request(`/ai-profiles/${id}/deactivate`, { method: 'POST' })
+}
+
+export function reorderAiProfiles(ids: number[]): Promise<AiProfile[]> {
+  return request('/ai-profiles/reorder', { method: 'POST', body: JSON.stringify({ ids }) })
+}
+
+export function getAiQueue(): Promise<AiQueueStatus> {
+  return request('/ai/queue')
+}
+
+export function updateAiSettings(payload: Partial<AiQueueSettings>): Promise<AiQueueSettings> {
+  return request('/ai/settings', { method: 'PUT', body: JSON.stringify(payload) })
+}
+
+export function retryUnsummarised(): Promise<{ queued: number }> {
+  return request('/ai/retry-unsummarised', { method: 'POST' })
 }
 
 export function testAiProfileDraft(payload: AiProfileInput): Promise<TestConnectionResult> {

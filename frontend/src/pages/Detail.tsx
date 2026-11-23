@@ -10,6 +10,7 @@ import {
   askAi,
   commonFieldEntries,
   deleteDocument,
+  dismissAi,
   getDocument,
   patchDocument,
   refileDocument,
@@ -36,6 +37,7 @@ export default function Detail() {
   const [suggestion, setSuggestion] = useState<AiSuggestion | null>(null)
   const [aiError, setAiError] = useState<string | null>(null)
   const [aiLoading, setAiLoading] = useState(false)
+  const [suggestionProfile, setSuggestionProfile] = useState<string | null>(null)
   const [flash, setFlash] = useState<{ message: string; kind: 'success' | 'error' } | null>(null)
   const [confirmDelete, setConfirmDelete] = useState(false)
 
@@ -86,12 +88,17 @@ export default function Detail() {
   })
 
   const applyMutation = useMutation({
-    mutationFn: (s: AiSuggestion) => applyAi(docId, s),
+    mutationFn: ({ s, profile }: { s: AiSuggestion; profile: string | null }) => applyAi(docId, s, profile),
     onSuccess: () => {
       refetchDoc()
       setSuggestion(null)
       setFlash({ message: 'AI suggestion applied', kind: 'success' })
     },
+  })
+
+  const dismissMutation = useMutation({
+    mutationFn: () => dismissAi(docId),
+    onSuccess: () => { refetchDoc(); setFlash({ message: 'Suggestion discarded; it will be retried', kind: 'success' }) },
   })
 
   async function handleAskAi() {
@@ -100,7 +107,7 @@ export default function Detail() {
     setSuggestion(null)
     try {
       const res = await askAi(docId)
-      if (res.suggestion) setSuggestion(res.suggestion)
+      if (res.suggestion) { setSuggestion(res.suggestion); setSuggestionProfile(res.profile ?? null) }
       else setAiError(res.error || 'AI suggestion unavailable.')
     } finally {
       setAiLoading(false)
@@ -178,6 +185,7 @@ export default function Detail() {
           <dt>Skipped</dt><dd>{doc.skipped ? 'yes' : 'no'}</dd>
           <dt>Created</dt><dd>{fmt(doc.created_at)}</dd>
           <dt>Reviewed</dt><dd>{fmt(doc.last_reviewed_at)}</dd>
+          <dt>AI model</dt><dd>{fmt(doc.ai_model)}</dd>
           <dt>Path</dt><dd>{fmt(doc.filepath)}</dd>
         </dl>
 
@@ -226,6 +234,24 @@ export default function Detail() {
             {aiLoading ? (<><span className="spinner" /> Asking AI…</>) : 'Ask AI'}
           </button>
           {aiError && <div className="notice">{aiError}</div>}
+          {!doc.ai_summary && !doc.ai_pending_suggestion && doc.ai_last_error && (
+            <div className="notice">
+              Background AI has not summarised this yet ({doc.ai_attempts} attempt{doc.ai_attempts === 1 ? '' : 's'}
+              {doc.ai_next_attempt_at ? `, next retry after ${doc.ai_next_attempt_at} UTC` : ''}): {doc.ai_last_error}
+            </div>
+          )}
+          {doc.ai_pending_suggestion && (
+            <div className="ai-card pending">
+              <strong>AI suggestion awaiting review{doc.ai_model ? ` (${doc.ai_model})` : ''}</strong>
+              <p><strong>Date:</strong> {doc.ai_pending_suggestion.date || '(none)'} &nbsp; <strong>Category:</strong> {doc.ai_pending_suggestion.category || '(none)'}</p>
+              {doc.ai_pending_suggestion.rationale && <p>{doc.ai_pending_suggestion.rationale}</p>}
+              {doc.ai_pending_suggestion.summary && <p>{doc.ai_pending_suggestion.summary}</p>}
+              <div className="inline-form" style={{ marginTop: 12 }}>
+                <button onClick={() => applyMutation.mutate({ s: doc.ai_pending_suggestion!, profile: doc.ai_model })}>Apply suggestion</button>
+                <button className="btn subtle" onClick={() => dismissMutation.mutate()}>Discard</button>
+              </div>
+            </div>
+          )}
           {suggestion && (
             <div className="ai-card pending">
               <strong>AI suggestion (not yet applied)</strong>
@@ -246,7 +272,7 @@ export default function Detail() {
                   ))}
                 </dl>
               )}
-              <button style={{ marginTop: 12 }} onClick={() => applyMutation.mutate(suggestion)}>
+              <button style={{ marginTop: 12 }} onClick={() => applyMutation.mutate({ s: suggestion, profile: suggestionProfile })}>
                 Apply suggestion
               </button>
             </div>
