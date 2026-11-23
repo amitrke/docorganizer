@@ -4,6 +4,7 @@ import { applyAi, bulkAskAi, commonFieldEntries, type AiSuggestion } from '../ap
 interface ItemState {
   status: 'pending' | 'suggested' | 'error' | 'applied' | 'applying'
   suggestion?: AiSuggestion
+  profile?: string | null
   error?: string
 }
 
@@ -27,7 +28,7 @@ export function BulkAiModal({
           ...prev,
           [event.doc_id]:
             event.status === 'suggested'
-              ? { status: 'suggested', suggestion: event.suggestion }
+              ? { status: 'suggested', suggestion: event.suggestion, profile: event.profile }
               : { status: 'error', error: event.error },
         }))
       }
@@ -40,7 +41,7 @@ export function BulkAiModal({
     const item = items[id]
     if (!item?.suggestion) return
     setItems((prev) => ({ ...prev, [id]: { ...prev[id], status: 'applying' } }))
-    await applyAi(id, item.suggestion)
+    await applyAi(id, item.suggestion, item.profile)
     setItems((prev) => ({ ...prev, [id]: { ...prev[id], status: 'applied' } }))
     onApplied()
   }

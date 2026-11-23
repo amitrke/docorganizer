@@ -1,6 +1,7 @@
 import json
 import re
 import sqlite3
+import threading
 from datetime import date
 from urllib import request
 from urllib.error import HTTPError
@@ -102,15 +103,10 @@ def ensure_ai_profiles_seeded(cfg: dict, conn: sqlite3.Connection) -> None:
         _migrate_legacy_ai_config(cfg, conn)
 
 
-def resolve_ai_config(cfg: dict, conn: sqlite3.Connection) -> dict | None:
-    """Settings for the active AI profile, or None if no profile is active."""
-    from .database import get_active_ai_profile
-
-    ensure_ai_profiles_seeded(cfg, conn)
-    profile = get_active_ai_profile(conn)
-    if profile is None:
-        return None
+def _profile_cfg(profile) -> dict:
     return {
+        "id": profile["id"],
+        "name": profile["name"],
         "provider": profile["provider"],
         "model": profile["model"],
         "base_url": profile["base_url"],
@@ -118,6 +114,27 @@ def resolve_ai_config(cfg: dict, conn: sqlite3.Connection) -> dict | None:
         "timeout": profile["timeout"],
         "max_tokens": profile["max_tokens"],
     }
+
+
+def resolve_ai_profiles(cfg: dict, conn: sqlite3.Connection) -> list[dict]:
+    """Enabled AI profiles in priority order (the pool); empty if none enabled."""
+    from .database import list_enabled_ai_profiles
+
+    ensure_ai_profiles_seeded(cfg, conn)
+    return [_profile_cfg(p) for p in list_enabled_ai_profiles(conn)]
+
+
+def resolve_ai_config(cfg: dict, conn: sqlite3.Connection) -> dict | None:
+    """Settings for the highest-priority enabled profile, or None if none is enabled."""
+    profiles = resolve_ai_profiles(cfg, conn)
+    return profiles[0] if profiles else None
+
+
+def profile_label(ai_cfg: dict) -> str:
+    """Human-readable "profile · model" tag stored with each suggestion for traceability."""
+    name = ai_cfg.get("name") or ai_cfg.get("provider", "")
+    model = ai_cfg.get("model", "")
+    return f"{name} · {model}" if model else str(name)
 
 
 def _repair_truncated_json(text: str) -> str | None:
@@ -330,11 +347,18 @@ def test_provider_connection(ai_cfg: dict) -> tuple[bool, str]:
 def suggest_date_category(*, text: str, filename: str, categories: list[str], ai_cfg: dict) -> dict | None:
     """Returns suggestion dict on success, or None. Sets suggest_date_category.last_error on failure.
 
-    Callers are responsible for checking there's an AI profile to use at all
-    (e.g. via resolve_ai_config returning non-None) before calling this.
+    Not thread-safe for last_error; threaded callers should use request_suggestion.
     """
-    suggest_date_category.last_error = ""
+    suggestion, error = request_suggestion(
+        text=text, filename=filename, categories=categories, ai_cfg=ai_cfg,
+    )
+    suggest_date_category.last_error = error
+    return suggestion
 
+
+def request_suggestion(*, text: str, filename: str, categories: list[str],
+                       ai_cfg: dict) -> tuple[dict | None, str]:
+    """Ask one provider for a suggestion. Returns (suggestion, "") or (None, error)."""
     prompt = (
         "Extract the most likely document date and category from this document text. "
         "Return ONLY strict JSON with keys: date, category, rationale, summary, fields, "
@@ -362,8 +386,7 @@ def suggest_date_category(*, text: str, filename: str, categories: list[str], ai
         raw = _call_provider(ai_cfg, prompt)
     except Exception as exc:
         provider = ai_cfg.get("provider", "ollama")
-        suggest_date_category.last_error = f"{provider} request failed: {exc}"
-        return None
+        return None, f"{provider} request failed: {exc}"
 
     cleaned = _strip_reasoning_tags(raw)
     parsed = _extract_json_block(cleaned)
@@ -372,15 +395,13 @@ def suggest_date_category(*, text: str, filename: str, categories: list[str], ai
             # No JSON anywhere in the response — almost always a "reasoning" model
             # that spent its whole token budget thinking out loud and got cut off
             # before ever emitting the answer, rather than a malformed-JSON issue.
-            suggest_date_category.last_error = (
+            return None, (
                 "The AI model returned reasoning text but no JSON — it likely ran out of "
                 "its token budget before producing an answer. Try raising Max tokens for "
                 "this profile in AI Settings, or switch to a less verbose/non-reasoning model. "
                 f"Response started with: {cleaned[:200]!r}"
             )
-        else:
-            suggest_date_category.last_error = f"Could not parse JSON from model response: {cleaned[:200]!r}"
-        return None
+        return None, f"Could not parse JSON from model response: {cleaned[:200]!r}"
 
     date_value = parsed.get("date")
     category_value = parsed.get("category")
@@ -419,7 +440,7 @@ def suggest_date_category(*, text: str, filename: str, categories: list[str], ai
             return None
         return f"{parsed_amount:.2f}"
 
-    return {
+    suggestion = {
         "date": date_value if isinstance(date_value, str) else None,
         "category": category_value if isinstance(category_value, str) else None,
         "rationale": rationale if isinstance(rationale, str) else "",
@@ -432,3 +453,79 @@ def suggest_date_category(*, text: str, filename: str, categories: list[str], ai
         "effective_date": _iso_date_or_none(parsed.get("effective_date")),
         "expiry_date": _iso_date_or_none(parsed.get("expiry_date")),
     }
+    return suggestion, ""
+
+
+def validate_suggestion(suggestion: dict, categories: list[str]) -> str | None:
+    """Return a reason the suggestion is unusable, or None if it is acceptable.
+
+    An empty/unknown category is rejected (applying it would refile the document
+    into a bogus folder), and an unparseable date is dropped rather than applied.
+    """
+    category = (suggestion.get("category") or "").strip()
+    if not category:
+        return "The AI model returned an empty or unrecognised category."
+    if categories and category.lower() not in {c.lower() for c in categories}:
+        return f"The AI model suggested an unknown category: {category!r}."
+    suggestion["category"] = next((c for c in categories if c.lower() == category.lower()), category)
+    raw_date = suggestion.get("date")
+    if raw_date:
+        try:
+            date.fromisoformat(raw_date)
+        except ValueError:
+            suggestion["date"] = None
+    return None
+
+
+_rr_lock = threading.Lock()
+_rr_counter = 0
+
+
+def _next_rr_offset(size: int) -> int:
+    global _rr_counter
+    with _rr_lock:
+        offset = _rr_counter % size
+        _rr_counter += 1
+    return offset
+
+
+def run_suggestion_pool(*, text: str, filename: str, categories: list[str],
+                        profiles: list[dict], mode: str = "fallback") -> tuple[dict | None, str, str]:
+    """Get a validated suggestion from the pool of enabled profiles.
+
+    Returns (suggestion, error, model_label). `fallback` tries profiles in priority
+    order; `round_robin` rotates the starting profile per call (spreading load across
+    keys) then falls back through the rest; `consensus` needs two profiles to agree on
+    the category (a single-profile pool behaves like fallback).
+    """
+    if not profiles:
+        return None, "No AI profile is enabled. Enable one in Settings.", ""
+
+    order = list(profiles)
+    if mode == "round_robin" and len(order) > 1:
+        offset = _next_rr_offset(len(order))
+        order = order[offset:] + order[:offset]
+
+    errors: list[str] = []
+    agreeing: list[tuple[dict, str]] = []
+    for ai_cfg in order:
+        label = profile_label(ai_cfg)
+        suggestion, error = request_suggestion(
+            text=text, filename=filename, categories=categories, ai_cfg=ai_cfg,
+        )
+        if suggestion is not None:
+            error = validate_suggestion(suggestion, categories) or ""
+        if suggestion is None or error:
+            errors.append(f"{label}: {error}")
+            continue
+        if mode == "consensus" and len(order) > 1:
+            for earlier, earlier_label in agreeing:
+                if earlier["category"].lower() == suggestion["category"].lower():
+                    return earlier, "", f"{earlier_label} + {label}"
+            agreeing.append((suggestion, label))
+            continue
+        return suggestion, "", label
+
+    if mode == "consensus" and agreeing:
+        errors.append("No two models agreed on a category.")
+    return None, "; ".join(errors) or "AI suggestion unavailable.", ""

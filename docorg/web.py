@@ -15,16 +15,20 @@ from .ai import (
     DEFAULT_AI_SETTINGS,
     PROVIDER_DEFAULTS,
     ensure_ai_profiles_seeded,
-    resolve_ai_config,
-    suggest_date_category,
+    resolve_ai_profiles,
+    run_suggestion_pool,
     test_provider_connection,
 )
+from .ai_worker import AiWorker, apply_ai_suggestion, pending_suggestion
 from .config import add_configured_category, get_configured_categories, remove_configured_category
 from .database import (
     SORT_COLUMNS,
+    ai_queue_counts,
     archive_document,
+    clear_pending_ai_suggestion,
     delete_ai_profile,
     get_ai_profile,
+    get_ai_queue_settings,
     get_connection,
     get_document_by_id,
     insert_ai_profile,
@@ -32,8 +36,11 @@ from .database import (
     list_categories,
     list_documents,
     parse_extracted_fields,
+    reorder_ai_profiles,
+    reset_ai_retries,
     search_documents,
-    set_active_ai_profile,
+    set_ai_profile_enabled,
+    set_ai_queue_settings,
     sweep_expired_documents,
     unarchive_document,
     update_ai_profile,
@@ -155,6 +162,11 @@ def _doc_to_dict(row) -> dict:
         "filing_status": row["filing_status"],
         "last_reviewed_at": row["last_reviewed_at"],
         "skipped": bool(row["skipped"]),
+        "ai_attempts": row["ai_attempts"],
+        "ai_last_error": row["ai_last_error"],
+        "ai_next_attempt_at": row["ai_next_attempt_at"],
+        "ai_model": row["ai_model"],
+        "ai_pending_suggestion": pending_suggestion(row),
         "created_at": row["created_at"],
     }
 
@@ -176,6 +188,18 @@ class ApplyAiRequest(BaseModel):
     amount: str | None = None
     effective_date: str | None = None
     expiry_date: str | None = None
+    profile: str | None = None  # "profile · model" that produced the suggestion
+
+
+class AiQueueSettingsUpdate(BaseModel):
+    mode: str | None = None
+    auto_apply: bool | None = None
+    background_enabled: bool | None = None
+    max_attempts: int | None = None
+
+
+class AiProfileReorder(BaseModel):
+    ids: list[int]
 
 
 class BulkAskAiRequest(BaseModel):
@@ -208,6 +232,7 @@ class AiProfileUpdate(BaseModel):
     api_key: str | None = None
     timeout: int | None = None
     max_tokens: int | None = None
+    is_active: bool | None = None
 
 
 class AiProfileTestPayload(BaseModel):
@@ -220,12 +245,16 @@ class AiProfileTestPayload(BaseModel):
 
 
 def create_app(cfg: dict, config_path: Path | None = None) -> FastAPI:
+    worker = AiWorker(cfg)
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         observer = start_observer(cfg)
+        worker.start()
         try:
             yield
         finally:
+            worker.stop()
             observer.stop()
             observer.join()
 
@@ -249,6 +278,7 @@ def create_app(cfg: dict, config_path: Path | None = None) -> FastAPI:
             "timeout": row["timeout"],
             "max_tokens": row["max_tokens"],
             "is_active": bool(row["is_active"]),
+            "priority": row["priority"],
             "has_key": bool(row["api_key"]),
         }
 
@@ -397,19 +427,18 @@ def create_app(cfg: dict, config_path: Path | None = None) -> FastAPI:
             row = get_document_by_id(conn, doc_id)
             if not row:
                 raise HTTPException(status_code=404, detail="Document not found")
-            ai_cfg = resolve_ai_config(cfg, conn)
-            if ai_cfg is None:
-                return {"suggestion": None, "error": "No AI profile is active. Activate one in Settings."}
-            suggestion = suggest_date_category(
-                text=row["extracted_text"] or "",
-                filename=row["filename"],
-                categories=cfg.get("categories", []),
-                ai_cfg=ai_cfg,
-            )
+            profiles = resolve_ai_profiles(cfg, conn)
+            mode = get_ai_queue_settings(conn)["mode"]
+        suggestion, error, model = run_suggestion_pool(
+            text=row["extracted_text"] or "",
+            filename=row["filename"],
+            categories=cfg.get("categories", []),
+            profiles=profiles,
+            mode=mode,
+        )
         if not suggestion:
-            error = getattr(suggest_date_category, "last_error", "") or "AI suggestion unavailable."
-            return {"suggestion": None, "error": error}
-        return {"suggestion": suggestion, "error": None}
+            return {"suggestion": None, "error": error or "AI suggestion unavailable.", "profile": None}
+        return {"suggestion": suggestion, "error": None, "profile": model}
 
     @api.post("/documents/{doc_id}/apply-ai")
     def api_apply_ai(doc_id: int, payload: ApplyAiRequest):
@@ -418,41 +447,34 @@ def create_app(cfg: dict, config_path: Path | None = None) -> FastAPI:
             if not row:
                 raise HTTPException(status_code=404, detail="Document not found")
 
-            update_document_fields(
-                conn, doc_id,
-                detected_date=payload.detected_date or None,
-                category=payload.category or None,
-                ai_suggested_category=payload.category or None,
-                classification_source="ai",
-                ai_rationale=payload.rationale or None,
-                ai_summary=payload.summary or None,
-                extracted_fields=payload.fields or None,
-                primary_person=payload.primary_person or None,
-                issuing_organization=payload.issuing_organization or None,
-                reference_number=payload.reference_number or None,
-                amount=payload.amount or None,
-                effective_date=payload.effective_date or None,
-                expiry_date=payload.expiry_date or None,
-                skipped=0,
+            if not (payload.category or "").strip():
+                raise HTTPException(status_code=422, detail="Refusing to apply a suggestion with no category")
+            if payload.detected_date and not _valid_iso_date(payload.detected_date):
+                raise HTTPException(status_code=422, detail="detected_date must be YYYY-MM-DD")
+
+            row = apply_ai_suggestion(
+                conn, cfg, row,
+                {
+                    "date": payload.detected_date, "category": payload.category.strip(),
+                    "rationale": payload.rationale, "summary": payload.summary,
+                    "fields": payload.fields, "primary_person": payload.primary_person,
+                    "issuing_organization": payload.issuing_organization,
+                    "reference_number": payload.reference_number, "amount": payload.amount,
+                    "effective_date": payload.effective_date, "expiry_date": payload.expiry_date,
+                },
+                model=payload.profile,
             )
+        return _doc_to_dict(row)
 
-            if payload.detected_date:
-                try:
-                    src = resolve_stored_path(row["filepath"], cfg)
-                    if src.exists():
-                        doc_date = date.fromisoformat(payload.detected_date)
-                        dest = file_document(
-                            src,
-                            documents_root=cfg["paths"]["documents"],
-                            doc_date=doc_date,
-                            category=payload.category or row["category"],
-                        )
-                        update_document_fields(conn, doc_id, filepath=to_stored_path(dest, cfg))
-                        ensure_thumbnail(doc_id, dest, cfg)
-                except ValueError:
-                    pass
-
+    @api.post("/documents/{doc_id}/dismiss-ai")
+    def api_dismiss_ai(doc_id: int):
+        """Discard a stored pending suggestion; the document re-enters the AI queue."""
+        with get_connection(db_path) as conn:
+            if not get_document_by_id(conn, doc_id):
+                raise HTTPException(status_code=404, detail="Document not found")
+            clear_pending_ai_suggestion(conn, doc_id)
             row = get_document_by_id(conn, doc_id)
+        worker.wake()
         return _doc_to_dict(row)
 
     @api.post("/documents/{doc_id}/refile")
@@ -547,6 +569,7 @@ def create_app(cfg: dict, config_path: Path | None = None) -> FastAPI:
                     return {"status": "failed", "filename": name, "message": str(exc)}
 
         if result["status"] == "filed":
+            worker.wake()
             return {
                 "status": "filed",
                 "filename": name,
@@ -565,11 +588,12 @@ def create_app(cfg: dict, config_path: Path | None = None) -> FastAPI:
 
         def _events():
             with get_connection(db_path) as conn:
-                ai_cfg = resolve_ai_config(cfg, conn)
+                profiles = resolve_ai_profiles(cfg, conn)
+                mode = get_ai_queue_settings(conn)["mode"]
                 categories_cfg = cfg.get("categories", [])
-                if ai_cfg is None:
+                if not profiles:
                     for doc_id in doc_ids:
-                        yield f"data: {json.dumps({'doc_id': doc_id, 'status': 'error', 'error': 'No AI profile is active. Activate one in Settings.'})}\n\n"
+                        yield f"data: {json.dumps({'doc_id': doc_id, 'status': 'error', 'error': 'No AI profile is enabled. Enable one in Settings.'})}\n\n"
                     yield f"data: {json.dumps({'status': 'done'})}\n\n"
                     return
                 for doc_id in doc_ids:
@@ -577,17 +601,17 @@ def create_app(cfg: dict, config_path: Path | None = None) -> FastAPI:
                     if not row:
                         yield f"data: {json.dumps({'doc_id': doc_id, 'status': 'error', 'error': 'Document not found'})}\n\n"
                         continue
-                    suggestion = suggest_date_category(
+                    suggestion, error, model = run_suggestion_pool(
                         text=row["extracted_text"] or "",
                         filename=row["filename"],
                         categories=categories_cfg,
-                        ai_cfg=ai_cfg,
+                        profiles=profiles,
+                        mode=mode,
                     )
                     if not suggestion:
-                        error = getattr(suggest_date_category, "last_error", "") or "AI suggestion unavailable."
-                        yield f"data: {json.dumps({'doc_id': doc_id, 'status': 'error', 'error': error})}\n\n"
+                        yield f"data: {json.dumps({'doc_id': doc_id, 'status': 'error', 'error': error or 'AI suggestion unavailable.'})}\n\n"
                     else:
-                        yield f"data: {json.dumps({'doc_id': doc_id, 'status': 'suggested', 'suggestion': suggestion})}\n\n"
+                        yield f"data: {json.dumps({'doc_id': doc_id, 'status': 'suggested', 'suggestion': suggestion, 'profile': model})}\n\n"
             yield f"data: {json.dumps({'status': 'done'})}\n\n"
 
         return StreamingResponse(_events(), media_type="text/event-stream")
@@ -665,6 +689,7 @@ def create_app(cfg: dict, config_path: Path | None = None) -> FastAPI:
                 kwargs["timeout"] = payload.timeout
             if "max_tokens" in fields_set:
                 kwargs["max_tokens"] = payload.max_tokens
+            enabled = payload.is_active if "is_active" in fields_set else None
 
             resolved_provider = kwargs.get("provider", existing["provider"])
             resolved_base_url = kwargs.get("base_url", existing["base_url"])
@@ -673,6 +698,8 @@ def create_app(cfg: dict, config_path: Path | None = None) -> FastAPI:
 
             if kwargs:
                 update_ai_profile(conn, profile_id, **kwargs)
+            if enabled is not None:
+                set_ai_profile_enabled(conn, profile_id, enabled)
             row = get_ai_profile(conn, profile_id)
         return _profile_to_dict(row)
 
@@ -691,9 +718,55 @@ def create_app(cfg: dict, config_path: Path | None = None) -> FastAPI:
             existing = get_ai_profile(conn, profile_id)
             if not existing:
                 raise HTTPException(status_code=404, detail="AI profile not found")
-            set_active_ai_profile(conn, profile_id)
+            set_ai_profile_enabled(conn, profile_id, True)
+            row = get_ai_profile(conn, profile_id)
+        worker.wake()
+        return _profile_to_dict(row)
+
+    @api.post("/ai-profiles/{profile_id}/deactivate")
+    def api_deactivate_ai_profile(profile_id: int):
+        with get_connection(db_path) as conn:
+            if not get_ai_profile(conn, profile_id):
+                raise HTTPException(status_code=404, detail="AI profile not found")
+            set_ai_profile_enabled(conn, profile_id, False)
             row = get_ai_profile(conn, profile_id)
         return _profile_to_dict(row)
+
+    @api.post("/ai-profiles/reorder")
+    def api_reorder_ai_profiles(payload: AiProfileReorder):
+        with get_connection(db_path) as conn:
+            reorder_ai_profiles(conn, payload.ids)
+            rows = list_ai_profiles(conn)
+        return [_profile_to_dict(r) for r in rows]
+
+    @api.get("/ai/queue")
+    def api_ai_queue():
+        with get_connection(db_path) as conn:
+            settings = get_ai_queue_settings(conn)
+            counts = ai_queue_counts(conn, max_attempts=settings["max_attempts"])
+        return {**counts, "settings": settings}
+
+    @api.put("/ai/settings")
+    def api_ai_settings(payload: AiQueueSettingsUpdate):
+        if payload.mode is not None and payload.mode not in {"fallback", "round_robin", "consensus"}:
+            raise HTTPException(status_code=422, detail="mode must be fallback, round_robin or consensus")
+        if payload.max_attempts is not None and payload.max_attempts < 1:
+            raise HTTPException(status_code=422, detail="max_attempts must be at least 1")
+        with get_connection(db_path) as conn:
+            set_ai_queue_settings(
+                conn, mode=payload.mode, auto_apply=payload.auto_apply,
+                background_enabled=payload.background_enabled, max_attempts=payload.max_attempts,
+            )
+            settings = get_ai_queue_settings(conn)
+        worker.wake()
+        return settings
+
+    @api.post("/ai/retry-unsummarised")
+    def api_ai_retry_unsummarised():
+        with get_connection(db_path) as conn:
+            count = reset_ai_retries(conn)
+        worker.wake()
+        return {"queued": count}
 
     @api.post("/ai-profiles/test")
     def api_test_ai_profile_draft(payload: AiProfileTestPayload):
